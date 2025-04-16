@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bluesky Sentiment Dashboard</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f0f2f5;
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+        }
+        .controls {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .controls button {
+            padding: 5px 15px;
+            margin: 0 5px;
+            cursor: pointer;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            background-color: #fff;
+        }
+        .controls button.active {
+            background-color: #d0d0d0;
+            font-weight: bold;
+        }
+        .chart-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+        /* Style for the full-width chart */
+        .chart-container.full-width {
+            grid-column: 1 / -1; /* Span all columns */
+        }
+        .chart-container {
+            background-color: #fff;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        canvas {
+            max-width: 100%;
+            height: auto;
+        }
+        h2 {
+            text-align: center;
+            margin-top: 0;
+            margin-bottom: 15px;
+            font-size: 1.1em;
+            color: #555;
+        }
+
+        /* Tooltip Styles */
+        .info-icon {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            display: inline-block;
+            cursor: help;
+            font-size: 0.9em;
+            color: #666;
+            padding: 5px;
+            z-index: 10;
+        }
+
+        .info-icon .tooltip-text {
+            visibility: hidden;
+            width: 240px;
+            background-color: #555;
+            color: #fff;
+            text-align: center;
+            border-radius: 6px;
+            padding: 8px;
+            position: absolute;
+            z-index: 1;
+            top: 100%;
+            left: 50%;
+            transform: translateX(-95%);
+            margin-top: 10px;
+            opacity: 0;
+            transition: opacity 0.3s;
+            font-size: 0.9em;
+            line-height: 1.4;
+        }
+
+        /* Tooltip arrow pointing up */
+        .info-icon .tooltip-text::after {
+            content: "";
+            position: absolute;
+            bottom: 100%;
+            left: 90%;
+            transform: translateX(-50%);
+            border-width: 5px;
+            border-style: solid;
+            border-color: transparent transparent #555 transparent;
+        }
+
+        .info-icon:hover .tooltip-text {
+            visibility: visible;
+            opacity: 1;
+        }
+    </style>
+</head>
+<body>
+    <!-- Info Icon/Trigger moved to top right -->
+    <span class="info-icon">
+        ? What do these numbers mean?
+        <span class="tooltip-text">Scores represent the average net sentiment per post within each 10-second interval, calculated as:<br>(Positive Score / Posts) - (Negative Score / Posts)</span>
+    </span>
+
+    <h1>
+        Bluesky Real-time Sentiment Trends
+    </h1>
+    <div class="controls">
+        <span style="margin-right: 10px;">Time Range:</span>
+        <button id="btn-12h" data-duration="12" class="active">12h</button>
+        <button id="btn-6h" data-duration="6">6h</button>
+        <button id="btn-2h" data-duration="2">2h</button>
+        <button id="btn-1h" data-duration="1">1h</button>
+        <button id="btn-15m" data-duration="0.25">15m</button>
+    </div>
+    <div class="chart-grid">
+        <!-- Add the new wider chart container at the top -->
+        <div class="chart-container full-width">
+            <h2>Overall Sentiment (Positive vs. Negative)</h2>
+            <canvas id="chart-posneg"></canvas>
+        </div>
+
+        <div class="chart-container">
+            <h2>Anger</h2>
+            <canvas id="chart-anger"></canvas>
+        </div>
+        <div class="chart-container">
+            <h2>Anticipation</h2>
+            <canvas id="chart-anticipation"></canvas>
+        </div>
+        <div class="chart-container">
+            <h2>Disgust</h2>
+            <canvas id="chart-disgust"></canvas>
+        </div>
+        <div class="chart-container">
+            <h2>Fear</h2>
+            <canvas id="chart-fear"></canvas>
+        </div>
+        <div class="chart-container">
+            <h2>Joy</h2>
+            <canvas id="chart-joy"></canvas>
+        </div>
+        <div class="chart-container">
+            <h2>Sadness</h2>
+            <canvas id="chart-sadness"></canvas>
+        </div>
+        <div class="chart-container">
+            <h2>Surprise</h2>
+            <canvas id="chart-surprise"></canvas>
+        </div>
+        <div class="chart-container">
+            <h2>Trust</h2>
+            <canvas id="chart-trust"></canvas>
+        </div>
+    </div>
+
+    <!-- REMOVE Chart.js library CDN includes -->
+    <!-- <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script> -->
+    <!-- <script src="https://cdn.jsdelivr.net/npm/moment@2.29.4/moment.min.js"></script> -->
+    <!-- <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-moment@1.0.1/dist/chartjs-adapter-moment.min.js"></script> -->
+
+    <!-- Include our bundled frontend script (still needs type="module") -->
+    <script type="module" src="./dist/app.js"></script>
+</body>
+</html> 
