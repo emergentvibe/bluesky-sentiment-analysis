@@ -40,9 +40,9 @@ type Emotion = keyof Omit<SentimentScores, 'positive' | 'negative'>; // Exclude 
 type SentimentCategory = keyof SentimentScores; // Include pos/neg
 
 interface AggregatedScoreEntry {
-    timestamp: number; // Unix timestamp (milliseconds)
-    scores: SentimentScores; // Use updated type
-    postCount: number; // Add post count
+    timestamp: number; // Use number consistently now
+    scores: SentimentScores;
+    postCount: number;
 }
 
 // --- Constants ---
@@ -50,6 +50,9 @@ const HOUR_MS = 60 * 60 * 1000;
 const DEFAULT_WINDOW_HOURS = 12;
 // Define aggregation interval (must match backend - now 10000ms)
 const AGGREGATION_INTERVAL_MS = 10 * 1000;
+const MOVING_AVG_WINDOW_MS = HOUR_MS; // 1 hour
+const MOVING_AVG_POINTS = MOVING_AVG_WINDOW_MS / AGGREGATION_INTERVAL_MS; // Number of data points in 1 hour
+
 let currentTimeWindowMs = DEFAULT_WINDOW_HOURS * HOUR_MS; // Default to 12 hours
 let currentChartData: AggregatedScoreEntry[] = []; // Store latest data for redraws
 
@@ -69,7 +72,39 @@ function connectWebSocket() {
     socket.onmessage = (event) => {
         try {
             const data: AggregatedScoreEntry[] = JSON.parse(event.data);
-            updateCharts(data);
+
+            if (!Array.isArray(data)) {
+                console.error('Received non-array data from WebSocket:', data);
+                return;
+            }
+
+            if (data.length === 0) {
+                // Ignore empty updates
+                return;
+            }
+
+            // Check if it's the initial historical data load or a single update
+            if (data.length > 1 || currentChartData.length === 0) {
+                // Initial load or full refresh: Replace existing data
+                console.log(`Received ${data.length} initial/historical data points.`);
+                currentChartData = data;
+            } else {
+                // Single update: Append the new data point
+                const newEntry = data[0];
+                console.log(`Received single update: ${new Date(newEntry.timestamp).toISOString()}`);
+                currentChartData.push(newEntry);
+
+                // Optional: Prune very old data from the *frontend* array to prevent unbounded growth
+                // (This complements backend DB pruning)
+                const cutoffTime = Date.now() - (DEFAULT_WINDOW_HOURS + 1) * HOUR_MS; // Keep slightly more than max view window
+                const firstValidIndex = currentChartData.findIndex(entry => entry.timestamp >= cutoffTime);
+                if (firstValidIndex > 0) {
+                    currentChartData.splice(0, firstValidIndex);
+                }
+            }
+
+            updateCharts(currentChartData);
+
         } catch (error) {
             console.error('Error parsing WebSocket message:', error);
         }
@@ -87,6 +122,48 @@ function connectWebSocket() {
 }
 
 // --- Chart Initialization and Update ---
+
+// Helper function to calculate moving average
+function calculateMovingAverage(data: (number | null)[], windowSize: number): (number | null)[] {
+    if (!data || data.length === 0 || windowSize <= 0) {
+        return [];
+    }
+
+    const result: (number | null)[] = [];
+    const rollingWindow: number[] = []; // Store only valid numbers
+    let rollingSum = 0;
+
+    for (let i = 0; i < data.length; i++) {
+        const currentValue = data[i];
+
+        // Add valid current value to window and sum
+        if (typeof currentValue === 'number' && isFinite(currentValue)) {
+            rollingWindow.push(currentValue);
+            rollingSum += currentValue;
+        }
+
+        // Remove value outside the window from the left
+        if (i >= windowSize) {
+            const valueToRemoveIndex = i - windowSize;
+            const valueToRemove = data[valueToRemoveIndex];
+            // Check if the value we *should* remove was actually added (i.e., was a valid number)
+            // This requires finding if the *oldest* number currently in rollingWindow corresponds to valueToRemove
+            // A simpler, slightly less precise approach for large windows is to just remove the oldest from rollingWindow if size exceeds windowSize
+            if (rollingWindow.length > windowSize) {
+                rollingSum -= rollingWindow.shift()!;
+            }
+        }
+
+        // Calculate and store the average if the window has values
+        if (rollingWindow.length > 0) {
+            result.push(rollingSum / rollingWindow.length);
+        } else {
+            result.push(null); // No valid data points in the window yet
+        }
+    }
+
+    return result;
+}
 
 const emotions: Emotion[] = ['anger', 'anticipation', 'disgust', 'fear', 'joy', 'sadness', 'surprise', 'trust'];
 const chartInstances: { [key in Emotion | 'posneg']?: Chart } = {};
@@ -150,16 +227,31 @@ function initializeCharts() {
                     type: 'line',
                     data: {
                         labels: [], // Initialize with empty labels
-                        datasets: [{
-                            label: emotion.charAt(0).toUpperCase() + emotion.slice(1),
-                            data: [], // Initialize with empty data
-                            borderColor: emotionColors[emotion],
-                            backgroundColor: emotionColors[emotion].replace('0.8', '0.5'),
-                            tension: 0.1,
-                            pointRadius: 2,
-                            pointHoverRadius: 4,
-                            borderWidth: 1.5
-                        }]
+                        datasets: [
+                            {
+                                label: emotion.charAt(0).toUpperCase() + emotion.slice(1),
+                                data: [], // Initialize with empty data
+                                // Apply dashed/fainter style to real value
+                                borderColor: emotionColors[emotion].replace('0.8', '0.3'), // Fainter color
+                                backgroundColor: 'transparent', // No background for dashed
+                                borderWidth: 1.5,
+                                borderDash: [5, 5], // Dashed line
+                                pointRadius: 0, // No points on real value line
+                                tension: 0.1
+                            },
+                            {
+                                label: '1h Moving Avg',
+                                data: [], // Initialize with empty data
+                                // Apply solid style to moving average
+                                borderColor: emotionColors[emotion],
+                                backgroundColor: emotionColors[emotion].replace('0.8', '0.5'),
+                                borderWidth: 1.5,
+                                // borderDash: [5, 5], // Remove dashed line
+                                pointRadius: 2, // Add points back to MA line
+                                pointHoverRadius: 4,
+                                tension: 0.1
+                            }
+                        ]
                     },
                     options: {
                         responsive: true,
@@ -199,12 +291,25 @@ function initializeCharts() {
                         {
                             label: 'Net Sentiment (Positive - Negative)', // Single dataset
                             data: [],
-                            borderColor: netSentimentColor, // Use new color
+                            // Apply dashed/fainter style to real value
+                            borderColor: netSentimentColor.replace('0.8', '0.3'), // Fainter color
+                            backgroundColor: 'transparent',
+                            borderWidth: 1.5,
+                            borderDash: [5, 5],
+                            pointRadius: 0,
+                            tension: 0.1
+                        },
+                        {
+                            label: '1h Moving Avg', // Add MA line dataset
+                            data: [],
+                            // Apply solid style to moving average
+                            borderColor: netSentimentColor,
                             backgroundColor: netSentimentColor.replace('0.8', '0.5'),
-                            tension: 0.1,
+                            borderWidth: 1.5,
+                            // borderDash: [5, 5], // Remove dashed
                             pointRadius: 2,
                             pointHoverRadius: 4,
-                            borderWidth: 1.5
+                            tension: 0.1
                         }
                     ]
                 },
@@ -293,6 +398,8 @@ function updateCharts(data: AggregatedScoreEntry[]) {
         if (chart && chart.data.datasets && chart.options?.scales?.x) {
             chart.data.labels = labels;
             chart.data.datasets[0].data = normalizedData[emotion];
+            // Calculate and update moving average dataset
+            chart.data.datasets[1].data = calculateMovingAverage(normalizedData[emotion], MOVING_AVG_POINTS);
             chart.options.scales.x.min = minTime;
             chart.options.scales.x.max = now;
             chart.update('none'); // Use 'none' for smoother updates when only data changes
@@ -304,6 +411,8 @@ function updateCharts(data: AggregatedScoreEntry[]) {
     if (posNegChart && posNegChart.data.datasets && posNegChart.options?.scales?.x) {
         posNegChart.data.labels = labels;
         posNegChart.data.datasets[0].data = normalizedNetSentimentData; // Update the single dataset
+        // Calculate and update moving average dataset
+        posNegChart.data.datasets[1].data = calculateMovingAverage(normalizedNetSentimentData, MOVING_AVG_POINTS);
         posNegChart.options.scales.x.min = minTime;
         posNegChart.options.scales.x.max = now;
         posNegChart.update('none'); // Use 'none' animation

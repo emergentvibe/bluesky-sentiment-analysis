@@ -130,7 +130,38 @@ This document outlines the plan to build a real-time dashboard that monitors Blu
         *   Updated `initializeWithZeroData` to include `positive: 0, negative: 0` in the initial zero scores.
         *   Modified `updateCharts` to calculate normalized `positive` and `negative` scores, then compute a **net sentiment score** (`positive - negative`) for the single dataset, and update the `chartInstances['posneg']` chart data and time window.
 
-8.  **Deployment Preparation (Fly.io):**
+7.8 **Add 1-Hour Moving Average Lines (✅ Completed):**
+    *   **Frontend (`public/app.ts`):**
+        *   Added constants `MOVING_AVG_WINDOW_MS` (1 hour) and `MOVING_AVG_POINTS` (window size in data points based on `AGGREGATION_INTERVAL_MS`).
+        *   Implemented a `calculateMovingAverage` helper function to compute the moving average for an array of scores.
+        *   Modified `initializeCharts` to add a second dataset to each chart configuration (8 emotion charts + 1 net sentiment chart). The first dataset (real-time value) is now styled dashed/fainter, and the second dataset (moving average) is styled as a solid, more prominent line.
+        *   Modified `updateCharts` to calculate the 1-hour moving average for each normalized data series (emotions and net sentiment) using `calculateMovingAverage` and `MOVING_AVG_POINTS`.
+        *   Assigned the calculated moving average data to the second dataset (`datasets[1]`) and the real-time data to the first dataset (`datasets[0]`) of each corresponding chart instance before updating the chart.
+
+8. **Add Database Persistence (Fly Postgres) (✅ Completed):**
+    *   **Infrastructure:**
+        *   Provisioned a Fly Postgres instance (`fly postgres create`).
+        *   Attached the Postgres instance to the application (`fly postgres attach`), setting the `DATABASE_URL` secret.
+    *   **Backend (`src/server.ts`):**
+        *   Installed `pg` and `@types/pg` dependencies.
+        *   Created a `pg.Pool` instance using `DATABASE_URL`.
+        *   Implemented `initializeDatabase` function (called in `main`) to:
+            *   Create `sentiment_data` table (timestamp TIMESTAMPTZ PK, scores JSONB, post_count INTEGER) if it doesn't exist.
+            *   Create an index on the timestamp column.
+        *   Removed the global in-memory `aggregatedData` array.
+        *   Modified `aggregateAndStore` to:
+            *   `INSERT` new `AggregatedScoreEntry` into `sentiment_data` table.
+            *   Broadcast *only* the newly inserted entry (wrapped in an array) via WebSocket.
+            *   Periodically `DELETE` old records (e.g., > 1 day) from the table.
+        *   Modified WebSocket `connection` handler to:
+            *   Query `sentiment_data` for the last 12 hours of data upon connection.
+            *   Send the retrieved historical data to the new client.
+    *   **Frontend (`public/app.ts`):**
+        *   Updated WebSocket `onmessage` handler to differentiate between initial multi-entry historical data (replace `currentChartData`) and single-entry updates (push to `currentChartData`).
+        *   Added optional pruning of the frontend `currentChartData` array.
+    *   **Deployment:** Verified `Dockerfile` correctly runs `npm install`. Set `PORT=3000` environment variable via `fly secrets set` to match `fly.toml` `internal_port`.
+
+9.  **Deployment Preparation (Fly.io):**
     *   Create a `Dockerfile` to containerize the application.
         *   Include steps to copy necessary files (`package.json`, `src`, `public`, `data` placeholder, compiled `dist`).
         *   Install dependencies (`npm install --omit=dev`).
@@ -142,12 +173,12 @@ This document outlines the plan to build a real-time dashboard that monitors Blu
         *   Potentially add health checks.
         *   **Note:** Will need to handle getting the NRC lexicon file into the deployed container (e.g., multi-stage build, adding it during deploy).
 
-9.  **Testing:**
+10. **Testing:**
     *   **TODO:** Add unit tests for sentiment analysis logic (`src/sentiment.ts`).
     *   **TODO:** Add unit tests for data aggregation/pruning logic (`src/server.ts`).
     *   **TODO:** Add basic integration tests for WebSocket communication (client connects, receives data).
 
-10. **Deployment:**
+11. **Deployment:**
     *   Install `flyctl`.
     *   Launch the app on Fly.io (`fly launch`).
     *   Deploy the application (`fly deploy`).

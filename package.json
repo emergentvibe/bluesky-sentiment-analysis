@@ -28,11 +28,13 @@
     "@atproto/api": "^0.15.0",
     "@atproto/repo": "^0.8.0",
     "@atproto/xrpc-server": "^0.7.15",
+    "@types/pg": "^8.11.13",
     "chart.js": "^4.4.9",
     "chartjs-adapter-moment": "^1.0.1",
     "franc": "^6.2.0",
     "mime-types": "^3.0.1",
     "moment": "^2.30.1",
+    "pg": "^8.14.1",
     "ws": "^8.18.1"
   }
 }

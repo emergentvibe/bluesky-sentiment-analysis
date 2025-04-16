@@ -7,6 +7,48 @@ import http from 'http';
 import fs from 'fs'; // Import fs for file serving
 import path from 'path'; // Import path for file paths
 import mime from 'mime-types'; // Import mime-types for content type detection
+import pg from 'pg'; // Import pg
+const { Pool } = pg;
+
+// --- Database Setup ---
+if (!process.env.DATABASE_URL) {
+    console.error('CRITICAL: DATABASE_URL environment variable is not set.');
+    process.exit(1);
+}
+
+const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    // Fly.io may require SSL depending on the network, but the internal connection string usually disables it.
+    // Enable it if you encounter connection issues:
+    // ssl: {
+    //   rejectUnauthorized: false // Required for self-signed certs often used internally
+    // }
+});
+
+// Database initialization function
+async function initializeDatabase() {
+    console.log('Initializing database...');
+    try {
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS sentiment_data (
+                timestamp TIMESTAMPTZ PRIMARY KEY,
+                scores JSONB NOT NULL,
+                post_count INTEGER NOT NULL
+            );
+        `);
+        console.log('Database table ensured.');
+
+        // Optional: Create an index for faster time-based queries
+        await pool.query(`
+            CREATE INDEX IF NOT EXISTS idx_sentiment_data_timestamp ON sentiment_data (timestamp DESC);
+        `);
+        console.log('Database index ensured.');
+
+    } catch (err: any) {
+        console.error('Database initialization failed:', err.message || err);
+        process.exit(1); // Exit if DB init fails
+    }
+}
 
 // Calculate paths from project root (current working directory)
 const PROJECT_ROOT = process.cwd();
@@ -76,20 +118,40 @@ function broadcast(data: any): void {
     });
 }
 
-wss.on('connection', (ws: WebSocket) => {
+wss.on('connection', async (ws: WebSocket) => {
     console.log('Client connected');
 
-    // Send the current aggregated data immediately on connection
-    ws.send(JSON.stringify(aggregatedData), (err) => {
-        if (err) {
-            console.error('Error sending initial data to client:', err);
-        }
-    });
+    try {
+        // Query historical data (last 12 hours) for the new client
+        const twelveHoursAgo = new Date(Date.now() - TWELVE_HOURS_MS);
+        const historyResult = await pool.query<AggregatedScoreEntry>(`
+            SELECT timestamp, scores, post_count as "postCount"
+            FROM sentiment_data
+            WHERE timestamp >= $1
+            ORDER BY timestamp ASC
+        `, [twelveHoursAgo]);
+
+        const historicalData = historyResult.rows.map(row => ({
+            ...row,
+            timestamp: new Date(row.timestamp).getTime() // Ensure timestamp is number
+        }));
+
+        console.log(`Sending ${historicalData.length} historical data points to new client.`);
+        // Send the historical data immediately on connection
+        ws.send(JSON.stringify(historicalData), (err) => {
+            if (err) {
+                console.error('Error sending initial historical data to client:', err);
+            }
+        });
+
+    } catch (err: any) {
+        console.error('Error fetching historical data for client:', err.message || err);
+        // Optionally send an error message to the client
+        ws.send(JSON.stringify({ error: 'Failed to load historical data' }));
+    }
 
     ws.on('message', (message: Buffer) => {
-        // Handle incoming messages if needed (e.g., client requests)
         console.log('Received message from client: %s', message);
-        // For now, just echo back or ignore
     });
 
     ws.on('close', () => {
@@ -103,23 +165,21 @@ wss.on('connection', (ws: WebSocket) => {
 
 // --- Data Structures for Aggregation ---
 
-// Represents the aggregated scores for a single time interval
+// Represents the aggregated scores for a single time interval (used for DB results too)
 interface AggregatedScoreEntry {
-    timestamp: number; // Unix timestamp (milliseconds)
+    timestamp: number | Date; // Allow Date from DB query
     scores: SentimentScores;
-    postCount: number; // Number of English posts in this interval
+    postCount: number;
 }
 
-// In-memory store for aggregated data (last 12 hours)
-const aggregatedData: AggregatedScoreEntry[] = [];
-
-// Temporary accumulator for the current interval
+// Temporary accumulator for the current interval (still needed)
 let currentIntervalScores: SentimentScores = createEmptyScores();
-let currentIntervalPostCount: number = 0; // Counter for English posts in interval
+let currentIntervalPostCount: number = 0;
 
 // Constants for aggregation
 const AGGREGATION_INTERVAL_MS = 10 * 1000;
 const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000;
+const ONE_DAY_MS = 24 * 60 * 60 * 1000; // For pruning
 
 // Helper function to create an empty scores object
 function createEmptyScores(): SentimentScores {
@@ -163,49 +223,71 @@ function processPost(postRecord: AppBskyFeedPost.Record, commitData: CommitData)
 }
 
 // --- Aggregation Timer ---
-function aggregateAndStore(): void {
+async function aggregateAndStore(): Promise<void> {
     const now = Date.now();
+    const timestamp = new Date(now);
 
-    // Create entry for the completed interval, including post count
+    // Create entry for the completed interval
     const newEntry: AggregatedScoreEntry = {
-        timestamp: now,
-        scores: { ...currentIntervalScores }, // Copy scores (includes positive/negative)
-        postCount: currentIntervalPostCount // Store post count
+        timestamp: now, // Use number for broadcasting consistency
+        scores: { ...currentIntervalScores },
+        postCount: currentIntervalPostCount
     };
 
-    // Add to the main data store
-    aggregatedData.push(newEntry);
-
-    // Reset the accumulators for the next interval
+    // Reset the accumulators immediately for the next interval
+    const savedScores = { ...currentIntervalScores };
+    const savedPostCount = currentIntervalPostCount;
     currentIntervalScores = createEmptyScores();
-    currentIntervalPostCount = 0; // Reset counter
+    currentIntervalPostCount = 0;
 
-    // Prune old data
-    const cutoffTime = now - TWELVE_HOURS_MS;
-    const firstValidIndex = aggregatedData.findIndex(entry => entry.timestamp >= cutoffTime);
-    if (firstValidIndex > 0) {
-        aggregatedData.splice(0, firstValidIndex);
-    }
+    // Save the completed interval to the database
+    try {
+        await pool.query(`
+            INSERT INTO sentiment_data (timestamp, scores, post_count)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (timestamp) DO NOTHING; -- Avoid errors if somehow timestamp collides
+        `, [timestamp, JSON.stringify(savedScores), savedPostCount]);
 
-    // Broadcast the UPDATED full dataset (which now includes postCount)
-    broadcast(aggregatedData);
-    if (wss.clients.size > 0 || aggregatedData.length % 20 === 1) { // Log every minute roughly, or if clients connected (adjust logging frequency)
-         console.log(`[${new Date(now).toISOString()}] Aggregated ${newEntry.postCount} posts. Broadcasting data (${wss.clients.size} clients).`);
+        // Broadcast ONLY the new data point
+        // Wrap in an array to match expected frontend format for a single update
+        broadcast([newEntry]);
+
+        if (wss.clients.size > 0 || Math.random() < 0.1) { // Log occasionally or if clients connected
+             console.log(`[${timestamp.toISOString()}] Aggregated ${savedPostCount} posts. Saved to DB. Broadcasting new entry.`);
+        }
+
+        // Prune old data (older than 1 day) from the database periodically
+        if (Math.random() < 0.05) { // Run roughly 5% of the time (every ~3.3 mins)
+            const cutoffTime = new Date(now - ONE_DAY_MS);
+            console.log(`Pruning data older than ${cutoffTime.toISOString()}...`);
+            const deleteResult = await pool.query(
+                'DELETE FROM sentiment_data WHERE timestamp < $1',
+                [cutoffTime]
+            );
+            if (deleteResult.rowCount !== null && deleteResult.rowCount > 0) {
+                 console.log(`Pruned ${deleteResult.rowCount} old entries from database.`);
+            }
+        }
+
+    } catch (err: any) {
+        console.error('Error saving or pruning data:', err.message || err);
+        // Restore accumulators if save failed? Or just log error and continue?
+        // For simplicity, just log and continue; the next interval might succeed.
+        // Consider more robust error handling/retry logic in production.
     }
 }
 
 // --- Main Application ---
-
-/**
- * Main application function.
- * Starts the firehose subscription and handles errors.
- */
 async function main() {
     console.log('Starting Bluesky Sentiment Analysis Service...');
 
+    // Initialize Database FIRST
+    await initializeDatabase();
+
     // Start the aggregation timer
+    // Note: No need to await setInterval, it runs independently
     setInterval(aggregateAndStore, AGGREGATION_INTERVAL_MS);
-    console.log(`Data aggregation started every ${AGGREGATION_INTERVAL_MS / 1000} seconds.`);
+    console.log(`Data aggregation and saving started every ${AGGREGATION_INTERVAL_MS / 1000} seconds.`);
 
     // Start firehose non-blocking
     console.log(`Throttling firehose processing: 1 / ${THROTTLE_FACTOR} posts.`);
