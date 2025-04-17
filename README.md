@@ -1,15 +1,12 @@
 # Bluesky Real-time Sentiment Analysis Dashboard
 
-[![Deployed to Fly.io](https://svg.fly.dev/app?name=bluesky-sentiment-analysis&sha=true)](https://bluesky-sentiment-analysis.fly.dev)
-
 A real-time dashboard that monitors the Bluesky firehose, performs sentiment analysis on posts using the NRC Emotion Lexicon, aggregates the results, and displays sentiment trends over time.
 
 **Live Demo:** [https://bluesky-sentiment-analysis.fly.dev](https://bluesky-sentiment-analysis.fly.dev)
 
 *(Note: Data persistence is enabled via Fly Postgres. Requires `fly proxy` for local development against the live DB.)*
 
-<!-- Optional: Add a screenshot or GIF here -->
-<!-- ![Screenshot](screenshot.png) -->
+![Dashboard Screenshot](screenshot.png)
 
 ## Features
 
@@ -97,7 +94,3 @@ Contributions are welcome!
 Please see the [backlog.md](backlog.md) file for a list of planned features and tasks.
 
 Feel free to open issues or submit pull requests.
-
-## License
-
-(TODO: Add license information here - e.g., MIT License) 
