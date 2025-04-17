@@ -50,10 +50,15 @@ const HOUR_MS = 60 * 60 * 1000;
 const DEFAULT_WINDOW_HOURS = 24; // Changed default to 1 day (24 hours)
 // Define aggregation interval (must match backend - now 10000ms)
 const AGGREGATION_INTERVAL_MS = 10 * 1000;
-const MOVING_AVG_WINDOW_MS = HOUR_MS; // 1 hour
-const MOVING_AVG_POINTS = MOVING_AVG_WINDOW_MS / AGGREGATION_INTERVAL_MS; // Number of data points in 1 hour
 
-let currentTimeWindowMs = DEFAULT_WINDOW_HOURS * HOUR_MS; // Default to 12 hours
+// Moving Average Windows
+const MINUTE_MS = 60 * 1000;
+const SHORT_AVG_WINDOW_MS = 5 * MINUTE_MS; // Changed to 5 minutes
+const SHORT_AVG_POINTS = SHORT_AVG_WINDOW_MS / AGGREGATION_INTERVAL_MS; // = 30 points
+const LONG_AVG_WINDOW_MS = HOUR_MS; // 1 hour
+const LONG_AVG_POINTS = LONG_AVG_WINDOW_MS / AGGREGATION_INTERVAL_MS; // = 360 points
+
+let currentTimeWindowMs = DEFAULT_WINDOW_HOURS * HOUR_MS; // Default to 1 day
 let currentChartData: AggregatedScoreEntry[] = []; // Store latest data for redraws
 
 // --- WebSocket Connection ---
@@ -229,25 +234,24 @@ function initializeCharts() {
                         labels: [], // Initialize with empty labels
                         datasets: [
                             {
-                                label: emotion.charAt(0).toUpperCase() + emotion.slice(1),
-                                data: [], // Initialize with empty data
-                                // Apply dashed/fainter style to real value
-                                borderColor: emotionColors[emotion].replace('0.8', '0.3'), // Fainter color
-                                backgroundColor: 'transparent', // No background for dashed
+                                label: '5-min Avg',
+                                data: [],
+                                // Apply dashed/fainter style to 5-min avg
+                                borderColor: emotionColors[emotion].replace('0.8', '0.3'),
+                                backgroundColor: 'transparent',
                                 borderWidth: 1.5,
-                                borderDash: [5, 5], // Dashed line
-                                pointRadius: 0, // No points on real value line
+                                borderDash: [5, 5],
+                                pointRadius: 0,
                                 tension: 0.1
                             },
                             {
-                                label: '1h Moving Avg',
-                                data: [], // Initialize with empty data
-                                // Apply solid style to moving average
+                                label: '1-hour Avg',
+                                data: [],
+                                // Apply solid style to 1-hour avg
                                 borderColor: emotionColors[emotion],
                                 backgroundColor: emotionColors[emotion].replace('0.8', '0.5'),
                                 borderWidth: 1.5,
-                                // borderDash: [5, 5], // Remove dashed line
-                                pointRadius: 2, // Add points back to MA line
+                                pointRadius: 2,
                                 pointHoverRadius: 4,
                                 tension: 0.1
                             }
@@ -289,10 +293,10 @@ function initializeCharts() {
                     labels: [],
                     datasets: [
                         {
-                            label: 'Net Sentiment (Positive - Negative)', // Single dataset
+                            label: 'Net Sentiment (5-min Avg)',
                             data: [],
-                            // Apply dashed/fainter style to real value
-                            borderColor: netSentimentColor.replace('0.8', '0.3'), // Fainter color
+                            // Apply dashed/fainter style to 5-min avg
+                            borderColor: netSentimentColor.replace('0.8', '0.3'),
                             backgroundColor: 'transparent',
                             borderWidth: 1.5,
                             borderDash: [5, 5],
@@ -300,13 +304,12 @@ function initializeCharts() {
                             tension: 0.1
                         },
                         {
-                            label: '1h Moving Avg', // Add MA line dataset
+                            label: 'Net Sentiment (1-hour Avg)',
                             data: [],
-                            // Apply solid style to moving average
+                            // Apply solid style to 1-hour avg
                             borderColor: netSentimentColor,
                             backgroundColor: netSentimentColor.replace('0.8', '0.5'),
                             borderWidth: 1.5,
-                            // borderDash: [5, 5], // Remove dashed
                             pointRadius: 2,
                             pointHoverRadius: 4,
                             tension: 0.1
@@ -363,7 +366,7 @@ function initializeWithZeroData() {
 }
 
 function updateCharts(data: AggregatedScoreEntry[]) {
-    currentChartData = data; // Store the latest data
+    currentChartData = data;
     if (!currentChartData || currentChartData.length === 0) {
         console.log("No chart data available.");
         return;
@@ -371,7 +374,7 @@ function updateCharts(data: AggregatedScoreEntry[]) {
 
     const labels = currentChartData.map(entry => entry.timestamp);
 
-    // Calculate normalized data for all categories
+    // Calculate normalized 10s data for all categories (basis for MAs)
     const normalizedData: { [key in SentimentCategory]: (number | null)[] } = {} as any;
     for (const key in currentChartData[0].scores) {
         const category = key as SentimentCategory;
@@ -380,13 +383,25 @@ function updateCharts(data: AggregatedScoreEntry[]) {
         );
     }
 
-    // Calculate Net Sentiment Data
+    // Calculate 1-min and 1-hour Moving Averages for each emotion
+    const shortAvgData: { [key in Emotion]: (number | null)[] } = {} as any;
+    const longAvgData: { [key in Emotion]: (number | null)[] } = {} as any;
+    emotions.forEach(emotion => {
+        shortAvgData[emotion] = calculateMovingAverage(normalizedData[emotion], SHORT_AVG_POINTS);
+        longAvgData[emotion] = calculateMovingAverage(normalizedData[emotion], LONG_AVG_POINTS);
+    });
+
+    // Calculate Net Sentiment (based on normalized 10s data)
     const normalizedNetSentimentData = normalizedData.positive.map((posScore, index) => {
         const negScore = normalizedData.negative[index];
         const numPosScore = typeof posScore === 'number' ? posScore : 0;
         const numNegScore = typeof negScore === 'number' ? negScore : 0;
         return numPosScore - numNegScore;
     });
+
+    // Calculate 1-min and 1-hour Moving Averages for Net Sentiment
+    const netSentimentShortAvg = calculateMovingAverage(normalizedNetSentimentData, SHORT_AVG_POINTS);
+    const netSentimentLongAvg = calculateMovingAverage(normalizedNetSentimentData, LONG_AVG_POINTS);
 
     // Calculate dynamic time window based on current setting
     const now = Date.now();
@@ -397,12 +412,11 @@ function updateCharts(data: AggregatedScoreEntry[]) {
         const chart = chartInstances[emotion];
         if (chart && chart.data.datasets && chart.options?.scales?.x) {
             chart.data.labels = labels;
-            chart.data.datasets[0].data = normalizedData[emotion];
-            // Calculate and update moving average dataset
-            chart.data.datasets[1].data = calculateMovingAverage(normalizedData[emotion], MOVING_AVG_POINTS);
+            chart.data.datasets[0].data = shortAvgData[emotion]; // Update dataset 0 with 1-min avg
+            chart.data.datasets[1].data = longAvgData[emotion]; // Update dataset 1 with 1-hour avg
             chart.options.scales.x.min = minTime;
             chart.options.scales.x.max = now;
-            chart.update('none'); // Use 'none' for smoother updates when only data changes
+            chart.update('none');
         }
     });
 
@@ -410,12 +424,11 @@ function updateCharts(data: AggregatedScoreEntry[]) {
     const posNegChart = chartInstances['posneg'];
     if (posNegChart && posNegChart.data.datasets && posNegChart.options?.scales?.x) {
         posNegChart.data.labels = labels;
-        posNegChart.data.datasets[0].data = normalizedNetSentimentData; // Update the single dataset
-        // Calculate and update moving average dataset
-        posNegChart.data.datasets[1].data = calculateMovingAverage(normalizedNetSentimentData, MOVING_AVG_POINTS);
+        posNegChart.data.datasets[0].data = netSentimentShortAvg; // Update dataset 0 with 1-min avg
+        posNegChart.data.datasets[1].data = netSentimentLongAvg; // Update dataset 1 with 1-hour avg
         posNegChart.options.scales.x.min = minTime;
         posNegChart.options.scales.x.max = now;
-        posNegChart.update('none'); // Use 'none' animation
+        posNegChart.update('none');
     }
 }
 

@@ -130,13 +130,18 @@ This document outlines the plan to build a real-time dashboard that monitors Blu
         *   Updated `initializeWithZeroData` to include `positive: 0, negative: 0` in the initial zero scores.
         *   Modified `updateCharts` to calculate normalized `positive` and `negative` scores, then compute a **net sentiment score** (`positive - negative`) for the single dataset, and update the `chartInstances['posneg']` chart data and time window.
 
-7.8 **Add 1-Hour Moving Average Lines (✅ Completed):**
+7.8 **Add Moving Average Lines (5-min & 1-hour) (✅ Completed):**
     *   **Frontend (`public/app.ts`):**
-        *   Added constants `MOVING_AVG_WINDOW_MS` (1 hour) and `MOVING_AVG_POINTS` (window size in data points based on `AGGREGATION_INTERVAL_MS`).
-        *   Implemented a `calculateMovingAverage` helper function to compute the moving average for an array of scores.
-        *   Modified `initializeCharts` to add a second dataset to each chart configuration (8 emotion charts + 1 net sentiment chart). The first dataset (real-time value) is now styled dashed/fainter, and the second dataset (moving average) is styled as a solid, more prominent line.
-        *   Modified `updateCharts` to calculate the 1-hour moving average for each normalized data series (emotions and net sentiment) using `calculateMovingAverage` and `MOVING_AVG_POINTS`.
-        *   Assigned the calculated moving average data to the second dataset (`datasets[1]`) and the real-time data to the first dataset (`datasets[0]`) of each corresponding chart instance before updating the chart.
+        *   Defined constants for short (5min) and long (1h) moving average windows (`SHORT_AVG_POINTS`, `LONG_AVG_POINTS`).
+        *   Implemented/verified `calculateMovingAverage` helper function.
+        *   Modified `initializeCharts`:
+            *   Each chart now has two datasets.
+            *   Dataset 0: Labeled "5-min Avg", styled dashed/fainter.
+            *   Dataset 1: Labeled "1-hour Avg", styled solid/prominent.
+        *   Modified `updateCharts`:
+            *   Calculates normalized 10s data as a base.
+            *   Calculates both 5-minute and 1-hour moving averages for each emotion and net sentiment using the normalized data.
+            *   Assigns 5-min MA to `datasets[0]` and 1-hour MA to `datasets[1]` for each chart.
 
 8. **Add Database Persistence (Fly Postgres) (✅ Completed):**
     *   **Infrastructure:**
