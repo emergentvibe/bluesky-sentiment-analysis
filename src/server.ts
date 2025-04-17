@@ -1,3 +1,5 @@
+import 'dotenv/config'; // Load .env file variables
+
 import { subscribeToFirehose } from './firehose.js';
 import { AppBskyFeedPost } from '@atproto/api';
 import { franc } from 'franc';
@@ -56,7 +58,7 @@ const PUBLIC_DIR = path.join(PROJECT_ROOT, 'public');
 const INDEX_HTML_PATH = path.join(PUBLIC_DIR, 'index.html');
 
 // --- HTTP and WebSocket Server Setup ---
-const PORT = parseInt(process.env.PORT || '8088');
+const PORT = parseInt(process.env.PORT || '3000');
 
 const server = http.createServer((req, res) => {
     console.log(`HTTP Request: ${req.method} ${req.url}`);
@@ -104,6 +106,16 @@ const wss = new WebSocketServer({ server });
 
 console.log(`HTTP and WebSocket server started on port ${PORT}`);
 
+// --- Constants for Time Ranges ---
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+const ONE_WEEK_MS = 7 * ONE_DAY_MS;
+const ONE_MONTH_MS = 30 * ONE_DAY_MS; // Approx 1 month for querying/pruning
+const MAX_HISTORY_MS = ONE_MONTH_MS; // Max history to send to clients
+const PRUNE_AGE_MS = 31 * ONE_DAY_MS; // Prune data older than ~31 days
+
+// Constants for aggregation
+const AGGREGATION_INTERVAL_MS = 10 * 1000;
+
 // Function to broadcast data to all connected clients
 function broadcast(data: any): void {
     const jsonData = JSON.stringify(data);
@@ -122,31 +134,27 @@ wss.on('connection', async (ws: WebSocket) => {
     console.log('Client connected');
 
     try {
-        // Query historical data (last 12 hours) for the new client
-        const twelveHoursAgo = new Date(Date.now() - TWELVE_HOURS_MS);
+        // Query historical data (last month) for the new client
+        const historyCutoff = new Date(Date.now() - MAX_HISTORY_MS);
         const historyResult = await pool.query<AggregatedScoreEntry>(`
             SELECT timestamp, scores, post_count as "postCount"
             FROM sentiment_data
             WHERE timestamp >= $1
             ORDER BY timestamp ASC
-        `, [twelveHoursAgo]);
+        `, [historyCutoff]);
 
         const historicalData = historyResult.rows.map(row => ({
             ...row,
-            timestamp: new Date(row.timestamp).getTime() // Ensure timestamp is number
+            timestamp: new Date(row.timestamp).getTime()
         }));
 
-        console.log(`Sending ${historicalData.length} historical data points to new client.`);
-        // Send the historical data immediately on connection
+        console.log(`Sending ${historicalData.length} historical data points (max ${MAX_HISTORY_MS / ONE_DAY_MS} days) to new client.`);
         ws.send(JSON.stringify(historicalData), (err) => {
-            if (err) {
-                console.error('Error sending initial historical data to client:', err);
-            }
+            if (err) console.error('Error sending initial historical data to client:', err);
         });
 
     } catch (err: any) {
         console.error('Error fetching historical data for client:', err.message || err);
-        // Optionally send an error message to the client
         ws.send(JSON.stringify({ error: 'Failed to load historical data' }));
     }
 
@@ -175,11 +183,6 @@ interface AggregatedScoreEntry {
 // Temporary accumulator for the current interval (still needed)
 let currentIntervalScores: SentimentScores = createEmptyScores();
 let currentIntervalPostCount: number = 0;
-
-// Constants for aggregation
-const AGGREGATION_INTERVAL_MS = 10 * 1000;
-const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000;
-const ONE_DAY_MS = 24 * 60 * 60 * 1000; // For pruning
 
 // Helper function to create an empty scores object
 function createEmptyScores(): SentimentScores {
@@ -249,16 +252,15 @@ async function aggregateAndStore(): Promise<void> {
         `, [timestamp, JSON.stringify(savedScores), savedPostCount]);
 
         // Broadcast ONLY the new data point
-        // Wrap in an array to match expected frontend format for a single update
         broadcast([newEntry]);
 
         if (wss.clients.size > 0 || Math.random() < 0.1) { // Log occasionally or if clients connected
              console.log(`[${timestamp.toISOString()}] Aggregated ${savedPostCount} posts. Saved to DB. Broadcasting new entry.`);
         }
 
-        // Prune old data (older than 1 day) from the database periodically
-        if (Math.random() < 0.05) { // Run roughly 5% of the time (every ~3.3 mins)
-            const cutoffTime = new Date(now - ONE_DAY_MS);
+        // Prune old data (older than ~31 days) from the database periodically
+        if (Math.random() < 0.05) { // Run roughly 5% of the time
+            const cutoffTime = new Date(now - PRUNE_AGE_MS);
             console.log(`Pruning data older than ${cutoffTime.toISOString()}...`);
             const deleteResult = await pool.query(
                 'DELETE FROM sentiment_data WHERE timestamp < $1',

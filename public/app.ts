@@ -47,7 +47,7 @@ interface AggregatedScoreEntry {
 
 // --- Constants ---
 const HOUR_MS = 60 * 60 * 1000;
-const DEFAULT_WINDOW_HOURS = 12;
+const DEFAULT_WINDOW_HOURS = 24; // Changed default to 1 day (24 hours)
 // Define aggregation interval (must match backend - now 10000ms)
 const AGGREGATION_INTERVAL_MS = 10 * 1000;
 const MOVING_AVG_WINDOW_MS = HOUR_MS; // 1 hour

@@ -161,32 +161,49 @@ This document outlines the plan to build a real-time dashboard that monitors Blu
         *   Added optional pruning of the frontend `currentChartData` array.
     *   **Deployment:** Verified `Dockerfile` correctly runs `npm install`. Set `PORT=3000` environment variable via `fly secrets set` to match `fly.toml` `internal_port`.
 
-9.  **Deployment Preparation (Fly.io):**
-    *   Create a `Dockerfile` to containerize the application.
-        *   Include steps to copy necessary files (`package.json`, `src`, `public`, `data` placeholder, compiled `dist`).
-        *   Install dependencies (`npm install --omit=dev`).
-        *   Set `CMD` to run the server (`npm start`).
-        *   Ensure `.dockerignore` excludes `node_modules`, `.git`, etc.
-    *   Create a `fly.toml` configuration file.
-        *   Define app name, primary region.
-        *   Configure `http_service` (internal port 8088, force https).
-        *   Potentially add health checks.
-        *   **Note:** Will need to handle getting the NRC lexicon file into the deployed container (e.g., multi-stage build, adding it during deploy).
+9. **Update Time Range Options (15m-1mo) (✅ Completed):**
+    *   **Frontend (`public/index.html`):
+        *   Restored previous time range buttons (15m, 1h, 2h, 6h, 12h) alongside the new ones (1d, 1w, 1mo).
+        *   Ensured `data-duration` attributes are correct for all buttons.
+        *   Set 1d (24h) as the default active button.
+    *   **Frontend (`public/app.ts`):
+        *   Changed `DEFAULT_WINDOW_HOURS` constant to 24.
+    *   **Backend (`src/server.ts`):**
+        *   Defined constants for `ONE_MONTH_MS`, `MAX_HISTORY_MS`, `PRUNE_AGE_MS`.
+        *   Updated WebSocket `connection` handler to query up to `MAX_HISTORY_MS` (1 month) from the database.
+        *   Updated `aggregateAndStore` pruning logic to delete data older than `PRUNE_AGE_MS` (~31 days).
+        *   Changed default `PORT` constant to 3000 to align with Fly configuration.
 
-10. **Testing:**
+10. **Deployment Preparation (Fly.io) (✅ Completed):**
+    *   Created a `Dockerfile` to containerize the application (multi-stage build).
+        *   Includes steps to copy necessary files (`package.json`, `src`, `public`, `data`, compiled `dist`).
+        *   Installs dependencies (`npm ci --include=dev` then `npm prune --omit=dev`).
+        *   NRC Lexicon file included via `COPY . .`.
+        *   Sets `CMD` to run the server (`npm start`).
+    *   Created a `fly.toml` configuration file.
+        *   Defined app name, primary region.
+        *   Configured `http_service` (internal port set to 3000, `force_https=true`).
+        *   Configured `auto_stop_machines = 'stop'`, `auto_start_machines = true`, `min_machines_running = 0` (later adjusted to 1).
+    *   Created `.gitignore` (implicitly includes `.dockerignore` patterns).
+    *   Set `PORT=3000` environment variable via `fly secrets set`.
+    *   Provisioned and attached Fly Postgres database, setting `DATABASE_URL` secret.
+    *   Configured for local development using `dotenv` and `fly proxy`.
+    *   Adjusted `min_machines_running = 1` in `fly.toml` to prevent hibernation.
+
+11. **Testing:**
     *   **TODO:** Add unit tests for sentiment analysis logic (`src/sentiment.ts`).
     *   **TODO:** Add unit tests for data aggregation/pruning logic (`src/server.ts`).
     *   **TODO:** Add basic integration tests for WebSocket communication (client connects, receives data).
 
-11. **Deployment:**
-    *   Install `flyctl`.
-    *   Launch the app on Fly.io (`fly launch`).
-    *   Deploy the application (`fly deploy`).
-    *   Monitor logs (`fly logs`).
+12. **Deployment (✅ Completed):**
+    *   Installed `flyctl` (Implicitly done by user).
+    *   Launched the app on Fly.io (`fly launch`).
+    *   Deployed the application (`fly deploy`).
+    *   Monitored logs (`fly logs`) for debugging.
 
 **Future Enhancements (Refined):**
 
-*   **Data Persistence:** Implement persistent storage (e.g., Redis for time-series, PostgreSQL/MongoDB for longer history) to retain data across restarts.
+*   **Data Persistence (✅ Completed):** Implemented using Fly Postgres.
 *   **Emoji Sentiment:** Integrate emoji sentiment analysis (e.g., using a dedicated library).
 *   **Advanced Filtering:** Allow filtering by keywords, users, or time ranges on the dashboard.
 *   **Improved Language Handling:** More sophisticated language detection/filtering (e.g., confidence scores).
@@ -196,7 +213,7 @@ This document outlines the plan to build a real-time dashboard that monitors Blu
 *   **Scalability:** Consider message queues (e.g., RabbitMQ, Kafka) for decoupling firehose processing from aggregation/broadcasting if load increases significantly.
 *   **Firehose Reconnection:** Add robust automatic reconnection logic for the firehose subscription in `src/firehose.ts`.
 *   **Logging:** Implement structured logging (e.g., using Winston or Pino) with configurable levels.
-*   **Configuration:** Move constants like port, intervals, throttle factor to environment variables.
+*   **Configuration (Partial ✅):** Moved `PORT` and `DATABASE_URL` to environment variables/secrets. Other constants (intervals, throttle factor) could still be moved.
 *   **Testing Coverage:** Expand unit and integration test coverage.
 *   **Rate Limiting:** Implement more graceful handling of potential Bluesky API rate limits (if using authenticated endpoints in the future).
 *   **Authentication:** Add optional authentication/authorization if exposing the dashboard publicly. 

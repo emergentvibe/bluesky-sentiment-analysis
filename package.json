@@ -31,6 +31,7 @@
     "@types/pg": "^8.11.13",
     "chart.js": "^4.4.9",
     "chartjs-adapter-moment": "^1.0.1",
+    "dotenv": "^16.5.0",
     "franc": "^6.2.0",
     "mime-types": "^3.0.1",
     "moment": "^2.30.1",

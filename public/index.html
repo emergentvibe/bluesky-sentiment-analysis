@@ -122,11 +122,16 @@
     </h1>
     <div class="controls">
         <span style="margin-right: 10px;">Time Range:</span>
-        <button id="btn-12h" data-duration="12" class="active">12h</button>
-        <button id="btn-6h" data-duration="6">6h</button>
-        <button id="btn-2h" data-duration="2">2h</button>
-        <button id="btn-1h" data-duration="1">1h</button>
+        <!-- Restore old buttons -->
         <button id="btn-15m" data-duration="0.25">15m</button>
+        <button id="btn-1h" data-duration="1">1h</button>
+        <button id="btn-2h" data-duration="2">2h</button>
+        <button id="btn-6h" data-duration="6">6h</button>
+        <button id="btn-12h" data-duration="12">12h</button>
+        <!-- Existing new buttons -->
+        <button id="btn-1d" data-duration="24" class="active">1d</button> <!-- Default: 1 day -->
+        <button id="btn-1w" data-duration="168">1w</button>
+        <button id="btn-1mo" data-duration="720">1mo</button>
     </div>
     <div class="chart-grid">
         <!-- Add the new wider chart container at the top -->
