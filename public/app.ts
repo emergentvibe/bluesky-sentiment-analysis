@@ -98,14 +98,6 @@ function connectWebSocket() {
                 const newEntry = data[0];
                 console.log(`Received single update: ${new Date(newEntry.timestamp).toISOString()}`);
                 currentChartData.push(newEntry);
-
-                // Optional: Prune very old data from the *frontend* array to prevent unbounded growth
-                // (This complements backend DB pruning)
-                const cutoffTime = Date.now() - (DEFAULT_WINDOW_HOURS + 1) * HOUR_MS; // Keep slightly more than max view window
-                const firstValidIndex = currentChartData.findIndex(entry => entry.timestamp >= cutoffTime);
-                if (firstValidIndex > 0) {
-                    currentChartData.splice(0, firstValidIndex);
-                }
             }
 
             updateCharts(currentChartData);
@@ -366,24 +358,33 @@ function initializeWithZeroData() {
 }
 
 function updateCharts(data: AggregatedScoreEntry[]) {
-    currentChartData = data;
+    currentChartData = data; // Store the latest full-resolution data
     if (!currentChartData || currentChartData.length === 0) {
         console.log("No chart data available.");
         return;
     }
 
-    const labels = currentChartData.map(entry => entry.timestamp);
+    const displayData = currentChartData; // Use the full data
 
-    // Calculate normalized 10s data for all categories (basis for MAs)
+    // If data is empty (should have been caught earlier, but safety check)
+    if (displayData.length === 0) {
+        console.log("No display data.");
+        return;
+    }
+
+    const labels = displayData.map(entry => entry.timestamp); // Use labels from full data
+
+    // Calculate normalized data based on the full dataset
     const normalizedData: { [key in SentimentCategory]: (number | null)[] } = {} as any;
-    for (const key in currentChartData[0].scores) {
+    for (const key in displayData[0].scores) { 
         const category = key as SentimentCategory;
-        normalizedData[category] = currentChartData.map(entry =>
+        normalizedData[category] = displayData.map(entry => 
             entry.postCount > 0 ? entry.scores[category] / entry.postCount : 0
         );
     }
 
-    // Calculate 1-min and 1-hour Moving Averages for each emotion
+    // Calculate 5-min and 1-hour Moving Averages for each emotion
+    // Use original constants based on 10s data for MA calculation
     const shortAvgData: { [key in Emotion]: (number | null)[] } = {} as any;
     const longAvgData: { [key in Emotion]: (number | null)[] } = {} as any;
     emotions.forEach(emotion => {
@@ -391,7 +392,7 @@ function updateCharts(data: AggregatedScoreEntry[]) {
         longAvgData[emotion] = calculateMovingAverage(normalizedData[emotion], LONG_AVG_POINTS);
     });
 
-    // Calculate Net Sentiment (based on normalized 10s data)
+    // Calculate Net Sentiment (based on full normalized data)
     const normalizedNetSentimentData = normalizedData.positive.map((posScore, index) => {
         const negScore = normalizedData.negative[index];
         const numPosScore = typeof posScore === 'number' ? posScore : 0;
@@ -399,7 +400,7 @@ function updateCharts(data: AggregatedScoreEntry[]) {
         return numPosScore - numNegScore;
     });
 
-    // Calculate 1-min and 1-hour Moving Averages for Net Sentiment
+    // Calculate 5-min and 1-hour Moving Averages for Net Sentiment (using full base)
     const netSentimentShortAvg = calculateMovingAverage(normalizedNetSentimentData, SHORT_AVG_POINTS);
     const netSentimentLongAvg = calculateMovingAverage(normalizedNetSentimentData, LONG_AVG_POINTS);
 
@@ -411,9 +412,9 @@ function updateCharts(data: AggregatedScoreEntry[]) {
     emotions.forEach(emotion => {
         const chart = chartInstances[emotion];
         if (chart && chart.data.datasets && chart.options?.scales?.x) {
-            chart.data.labels = labels;
-            chart.data.datasets[0].data = shortAvgData[emotion]; // Update dataset 0 with 1-min avg
-            chart.data.datasets[1].data = longAvgData[emotion]; // Update dataset 1 with 1-hour avg
+            chart.data.labels = labels; // Use labels from full data
+            chart.data.datasets[0].data = shortAvgData[emotion];
+            chart.data.datasets[1].data = longAvgData[emotion];
             chart.options.scales.x.min = minTime;
             chart.options.scales.x.max = now;
             chart.update('none');
@@ -423,9 +424,9 @@ function updateCharts(data: AggregatedScoreEntry[]) {
     // Update the positive/negative (net sentiment) chart
     const posNegChart = chartInstances['posneg'];
     if (posNegChart && posNegChart.data.datasets && posNegChart.options?.scales?.x) {
-        posNegChart.data.labels = labels;
-        posNegChart.data.datasets[0].data = netSentimentShortAvg; // Update dataset 0 with 1-min avg
-        posNegChart.data.datasets[1].data = netSentimentLongAvg; // Update dataset 1 with 1-hour avg
+        posNegChart.data.labels = labels; // Use labels from full data
+        posNegChart.data.datasets[0].data = netSentimentShortAvg;
+        posNegChart.data.datasets[1].data = netSentimentLongAvg;
         posNegChart.options.scales.x.min = minTime;
         posNegChart.options.scales.x.max = now;
         posNegChart.update('none');

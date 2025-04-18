@@ -181,14 +181,14 @@ This document outlines the plan to build a real-time dashboard that monitors Blu
 
 10. **Deployment Preparation (Fly.io) (✅ Completed):**
     *   Created a `Dockerfile` to containerize the application (multi-stage build).
-        *   Includes steps to copy necessary files (`package.json`, `src`, `public`, `data`, compiled `dist`).
-        *   Installs dependencies (`npm ci --include=dev` then `npm prune --omit=dev`).
-        *   NRC Lexicon file included via `COPY . .`.
-        *   Sets `CMD` to run the server (`npm start`).
+    *   Includes steps to copy necessary files (`package.json`, `src`, `public`, `data`, compiled `dist`).
+    *   Installs dependencies (`npm ci --include=dev` then `npm prune --omit=dev`).
+    *   NRC Lexicon file included via `COPY . .`.
+    *   Sets `CMD` to run the server (`npm start`).
     *   Created a `fly.toml` configuration file.
-        *   Defined app name, primary region.
-        *   Configured `http_service` (internal port set to 3000, `force_https=true`).
-        *   Configured `auto_stop_machines = 'stop'`, `auto_start_machines = true`, `min_machines_running = 0` (later adjusted to 1).
+    *   Defined app name, primary region.
+    *   Configured `http_service` (internal port set to 3000, `force_https=true`).
+    *   Configured `auto_stop_machines = 'stop'`, `auto_start_machines = true`, `min_machines_running = 0` (later adjusted to 1).
     *   Created `.gitignore` (implicitly includes `.dockerignore` patterns).
     *   Set `PORT=3000` environment variable via `fly secrets set`.
     *   Provisioned and attached Fly Postgres database, setting `DATABASE_URL` secret.
@@ -221,4 +221,4 @@ This document outlines the plan to build a real-time dashboard that monitors Blu
 *   **Configuration (Partial ✅):** Moved `PORT` and `DATABASE_URL` to environment variables/secrets. Other constants (intervals, throttle factor) could still be moved.
 *   **Testing Coverage:** Expand unit and integration test coverage.
 *   **Rate Limiting:** Implement more graceful handling of potential Bluesky API rate limits (if using authenticated endpoints in the future).
-*   **Authentication:** Add optional authentication/authorization if exposing the dashboard publicly. 
+*   **Authentication:** Add optional authentication/authorization if exposing the dashboard publicly.
