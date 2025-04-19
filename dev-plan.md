@@ -222,7 +222,7 @@ This document outlines the plan to build a real-time dashboard that monitors Blu
         *   Modify historical MA calculation (`calculateSentimentMovingAverage`/`calculateNumericMovingAverage`) to compute and return an average at each point based on the available data within the sliding window up to that point, removing the check that waits for a full window.
     *   **Goal:** Eliminate `null` gaps in MA lines on the frontend, providing continuous visualization (accepting initial values represent partial windows).
 
-14. **UI/UX Refactor: Dynamic Signal Plotting MVP (⚪ To Do):**
+14. **UI/UX Refactor: Dynamic Signal Plotting MVP (DONE):**
     *   **Goal:** Improve usability by consolidating charts and allowing users to dynamically add specific signals (language + metric combination) to a main chart area.
     *   **14.1: Frontend - Simplify Chart Layout (`public/index.html`):**
         *   Reduce HTML to contain only two main canvas elements: `mainChart` (for line signals) and `volumeChart` (for stacked bars).

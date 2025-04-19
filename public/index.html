@@ -3,251 +3,139 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Bluesky Sentiment Dashboard</title>
+    <title>Bluesky Real-time Sentiment</title>
     <style>
-        body {
-            font-family: sans-serif;
-            margin: 0;
-            padding: 20px;
-            background-color: #f0f2f5;
-            display: flex;
-            flex-direction: column;
-            min-height: 100vh;
+        body { font-family: sans-serif; margin: 0; background-color: #f4f7f6; color: #333; display: flex; flex-direction: column; min-height: 100vh; }
+        header { background-color: #007bff; color: white; padding: 15px 25px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        header h1 { margin: 0; font-size: 1.5em; }
+        main { flex-grow: 1; padding: 20px; }
+        .controls { background-color: white; padding: 15px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 15px; }
+        .controls label { font-weight: bold; margin-right: 5px; }
+        .controls select, .controls button { padding: 8px 12px; border: 1px solid #ccc; border-radius: 4px; font-size: 0.9em; }
+        .controls button { background-color: #007bff; color: white; cursor: pointer; transition: background-color 0.2s; }
+        .controls button:hover { background-color: #0056b3; }
+        .chart-grid { 
+            display: grid; 
+            grid-template-columns: 1fr; /* Force single column */
+            gap: 20px; 
         }
-        h1 {
-            text-align: center;
-            color: #333;
-            margin-top: 0;
-        }
-        header {
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-start; /* Align items to the top */
-            padding-bottom: 15px;
-            border-bottom: 1px solid #ddd;
-            margin-bottom: 20px;
-        }
+        .chart-container { background-color: white; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); position: relative; min-height: 350px; /* Ensure charts have min height */ }
+        .chart-container h2 { margin-top: 0; text-align: center; font-size: 1.1em; color: #555; }
+        .chart-container canvas { max-height: 400px; /* Limit canvas height */ }
+        .info-icon { font-size: 0.8em; background-color: #eee; color: #333; border-radius: 50%; padding: 2px 6px; cursor: help; position: relative; display: inline-block; margin-left: 5px; }
+        .tooltip-text { visibility: hidden; width: 250px; background-color: #555; color: #fff; text-align: center; border-radius: 6px; padding: 8px; position: absolute; z-index: 1; bottom: 125%; left: 50%; margin-left: -125px; opacity: 0; transition: opacity 0.3s; font-size: 0.9em; }
+        .info-icon:hover .tooltip-text { visibility: visible; opacity: 1; }
+        footer { background-color: #e9ecef; color: #6c757d; text-align: center; padding: 10px; margin-top: auto; font-size: 0.9em; }
 
-        .controls-container {
-            display: flex;
-            gap: 20px; /* Space between control groups */
-            align-items: flex-start; /* Align tops of control groups */
-            flex-wrap: wrap; /* Allow wrapping on smaller screens */
-            justify-content: center; /* Center controls horizontally */
-        }
-
-        .control-group {
-             display: flex;
-             flex-direction: column; /* Stack label and control */
-             align-items: center; /* Center items within the group */
-        }
-
-        .control-group label {
-            margin-bottom: 5px;
-            font-weight: bold;
-            color: #555;
-        }
-
-        .control-group select,
-        .language-selector-container {
-            padding: 8px;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            min-width: 150px; /* Give controls some base width */
-        }
-
-        .language-selector-container {
-            max-height: 150px; /* Limit height */
-            overflow-y: auto; /* Add scrollbar */
-            background-color: #fff;
-             padding: 10px;
-        }
-
-         .language-option {
-            display: block; /* Each on its own line */
-            margin-bottom: 5px;
-            white-space: nowrap;
-        }
-
-         .language-option label {
-             margin-left: 5px; /* Space between checkbox and text */
-             font-weight: normal; /* Override bold from control-group */
-             color: #333;
-         }
-
-        .chart-grid {
-            display: grid;
-            /* Create 2 primary columns, but allow smaller charts to fit */
-            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
-            gap: 20px;
-            flex-grow: 1; /* Allow grid to take remaining space */
-            margin-top: 20px;
-        }
-
-        /* Make Sentiment and Volume charts span full width */
-        .chart-container.full-width {
-            grid-column: 1 / -1; /* Span all available columns */
-             height: 40vh; /* Adjust height for primary charts */
-             min-height: 300px;
-        }
-
-        .chart-container {
-            background-color: #fff;
-            padding: 15px;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-            display: flex;
-            flex-direction: column;
-            min-height: 300px; /* Default height for smaller charts */
-            height: 35vh; /* Default height */
-        }
-        canvas {
-            flex-grow: 1; /* Allow canvas to fill container */
-            max-width: 100%;
-            height: auto; /* Maintain aspect ratio if width constrained */
-        }
-        .chart-container h2 {
-            text-align: center;
-            margin-top: 0;
-            margin-bottom: 15px;
-            font-size: 1.2em;
-            color: #555;
-        }
-
-        /* Tooltip Styles */
-        .info-icon {
-            position: absolute;
-            top: 20px;
-            right: 20px;
-            display: inline-block;
-            cursor: help;
-            font-size: 0.9em;
-            color: #666;
-            padding: 5px;
-            z-index: 10;
-        }
-
-        .info-icon .tooltip-text {
-            visibility: hidden;
-            width: 240px;
-            background-color: #555;
-            color: #fff;
-            text-align: center;
-            border-radius: 6px;
-            padding: 8px;
-            position: absolute;
-            z-index: 1;
-            top: 100%;
+        /* New Styles for Signal Plotting */
+        #signalSelector {
+            display: none; /* Hidden by default */
+            position: fixed; /* Or absolute, depending on desired behavior */
+            top: 50%;
             left: 50%;
-            transform: translateX(-95%);
-            margin-top: 10px;
-            opacity: 0;
-            transition: opacity 0.3s;
-            font-size: 0.9em;
-            line-height: 1.4;
+            transform: translate(-50%, -50%);
+            background-color: white;
+            padding: 25px;
+            border: 1px solid #ccc;
+            border-radius: 8px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+            z-index: 1000;
+            width: 350px;
         }
+        #signalSelector h3 { margin-top: 0; text-align: center; margin-bottom: 20px; }
+        #signalSelector div { margin-bottom: 15px; }
+        #signalSelector label { display: inline-block; width: 80px; }
+        #signalSelector select, #signalSelector input[type="checkbox"] { margin-left: 10px; }
+        #signalSelector .checkbox-group label { width: auto; margin-left: 5px; }
+        #signalSelector .button-group { text-align: right; margin-top: 20px; }
+        #signalSelector button { margin-left: 10px; }
+        #plottedSignalsList { margin-top: 15px; background-color: #fff; padding: 10px 15px; border-radius: 5px; box-shadow: inset 0 1px 2px rgba(0,0,0,0.05); }
+        #plottedSignalsList ul { list-style: none; padding: 0; margin: 0; }
+        #plottedSignalsList li { background-color: #e9ecef; padding: 5px 10px; margin-bottom: 5px; border-radius: 3px; font-size: 0.9em; display: flex; justify-content: space-between; align-items: center; }
+        #plottedSignalsList .remove-signal-btn { background: none; border: none; color: red; cursor: pointer; font-weight: bold; font-size: 1.1em; padding: 0 5px; }
+        .chart-container-large { min-height: 450px; } /* Taller main chart */
 
-        /* Tooltip arrow pointing up */
-        .info-icon .tooltip-text::after {
-            content: "";
-            position: absolute;
-            bottom: 100%;
-            left: 90%;
-            transform: translateX(-50%);
-            border-width: 5px;
-            border-style: solid;
-            border-color: transparent transparent #555 transparent;
-        }
-
-        .info-icon:hover .tooltip-text {
-            visibility: visible;
-            opacity: 1;
-        }
     </style>
 </head>
 <body>
     <header>
-        <h1>Bluesky Real-time Sentiment Trends</h1>
-        <!-- Info Icon/Trigger moved to top right of header -->
-        <span class="info-icon">
-            ? What do these numbers mean?
-            <span class="tooltip-text">Sentiment score is the average net sentiment (Positive - Negative) per post.<br>Volume is the number of posts per interval.<br>MAs are Moving Averages (hidden by default, click legend).</span>
-        </span>
-    </header>
-
-    <!-- Consolidated Controls -->
-    <div class="controls-container">
-        <div class="control-group">
-            <label for="timeWindowSelect">Time Range:</label>
+        <h1>Bluesky Sentiment <span class="info-icon">?<span class="tooltip-text">Sentiment Scores are averaged across posts within the server's aggregation interval (currently 10 seconds). Moving averages smooth these scores over longer periods.</span></span></h1>
+        <div class="controls-right">
+             <label for="timeWindowSelect">Time Window:</label>
             <select id="timeWindowSelect">
-                <option value="0.25">15 Minutes</option>
-                <option value="1">1 Hour</option>
-                <option value="2">2 Hours</option>
-                <option value="6">6 Hours</option>
-                <option value="12">12 Hours</option>
-                <option value="24" selected>1 Day</option> <!-- Default selected -->
-                <option value="168">1 Week</option>
-                <option value="720">1 Month</option>
+                <option value="0.25">15 min</option>
+                <option value="1">1 hour</option>
+                <option value="2">2 hours</option>
+                <option value="6">6 hours</option>
+                <option value="12">12 hours</option>
+                <option value="24">1 day</option> <!-- Default -->
+                <option value="168">1 week</option>
+                <option value="720">1 month</option> <!-- Approx -->
             </select>
         </div>
-        <div class="control-group">
-            <label for="languageSelector">Languages:</label>
-            <div id="languageSelector" class="language-selector-container">
-                <!-- Checkboxes will be populated dynamically by app.ts -->
+    </header>
+
+    <main>
+        <div class="controls">
+            <div>
+                <button id="addSignalBtn">+ Add Signal</button>
+            </div>
+             <div id="plottedSignalsList">
+                 <!-- Plotted signals will be listed here by app.ts -->
+                 <p>No signals added yet.</p>
+             </div>
+        </div>
+
+        <!-- Signal Selector Modal -->
+        <div id="signalSelector">
+            <h3>Configure Signal</h3>
+            <div>
+                <label for="langSelect">Language:</label>
+                <select id="langSelect">
+                    <!-- Options populated by app.ts -->
+                </select>
+            </div>
+            <div>
+                <label for="metricSelect">Metric:</label>
+                <select id="metricSelect">
+                    <!-- Options populated by app.ts -->
+                </select>
+            </div>
+             <div>
+                 <label for="signalColor">Color:</label>
+                 <input type="color" id="signalColor"> <!-- REMOVED default value attribute -->
+             </div>
+            <div class="checkbox-group">
+                Show:
+                <input type="checkbox" id="showRaw" checked> <label for="showRaw">Raw Score</label>
+                <input type="checkbox" id="showShortMA" checked> <label for="showShortMA">5m MA</label>
+                <input type="checkbox" id="showLongMA" checked> <label for="showLongMA">1h MA</label>
+            </div>
+            <div class="button-group">
+                <button id="cancelSignalBtn">Cancel</button>
+                <button id="confirmSignalBtn">Add</button>
             </div>
         </div>
-    </div>
 
-    <!-- Chart Grid -->
-    <div class="chart-grid">
-        <!-- Sentiment Chart (Full Width) -->
-        <div class="chart-container full-width">
-            <h2>Sentiment Score (Net)</h2>
-            <canvas id="sentimentChart"></canvas> <!-- CORRECT ID -->
-        </div>
-
-        <!-- Volume Chart (Full Width) -->
-        <div class="chart-container full-width">
-            <h2>Post Volume</h2>
-            <canvas id="volumeChart"></canvas> <!-- CORRECT ID -->
+        <!-- New Chart Grid -->
+        <div class="chart-grid">
+             <div class="chart-container chart-container-large"> <!-- Make main chart taller -->
+                 <h2>Sentiment Trends</h2>
+                 <canvas id="mainChart"></canvas>
+             </div>
+             <div class="chart-container">
+                 <h2>Post Volume</h2>
+                 <canvas id="volumeChart"></canvas>
+             </div>
         </div>
 
-        <!-- Individual Emotion Charts (Grid Layout) -->
-        <div class="chart-container">
-            <h2>Anger</h2>
-            <canvas id="chart-anger"></canvas>
-        </div>
-        <div class="chart-container">
-            <h2>Anticipation</h2>
-            <canvas id="chart-anticipation"></canvas>
-        </div>
-        <div class="chart-container">
-            <h2>Disgust</h2>
-            <canvas id="chart-disgust"></canvas>
-        </div>
-        <div class="chart-container">
-            <h2>Fear</h2>
-            <canvas id="chart-fear"></canvas>
-        </div>
-        <div class="chart-container">
-            <h2>Joy</h2>
-            <canvas id="chart-joy"></canvas>
-        </div>
-        <div class="chart-container">
-            <h2>Sadness</h2>
-            <canvas id="chart-sadness"></canvas>
-        </div>
-        <div class="chart-container">
-            <h2>Surprise</h2>
-            <canvas id="chart-surprise"></canvas>
-        </div>
-        <div class="chart-container">
-            <h2>Trust</h2>
-            <canvas id="chart-trust"></canvas>
-        </div>
-    </div>
+    </main>
 
-    <!-- Include our bundled frontend script -->
-    <script type="module" src="./dist/app.js"></script>
+    <footer>
+        Real-time data powered by Bluesky Firehose & NRC Emotion Lexicon.
+    </footer>
+
+    <!-- Load bundled JS -->
+    <script src="dist/app.js" type="module"></script>
 </body>
 </html> 

@@ -13,7 +13,8 @@ import {
     ChartTypeRegistry,
     InteractionMode,
     ScaleType,
-    ChartConfiguration // Import ChartConfiguration type
+    ChartConfiguration,
+    ChartDataset
 } from 'chart.js';
 import 'chartjs-adapter-moment'; // Import the adapter
 import moment from 'moment'; // Import moment
@@ -78,7 +79,6 @@ const colors = {
     trust: 'rgba(100, 180, 120, 0.8)',
     // Colors for MA lines will be handled dynamically
 };
-const emotionKeys: (keyof SentimentScores)[] = ['anger', 'anticipation', 'disgust', 'fear', 'joy', 'sadness', 'surprise', 'trust'];
 const netSentimentLabel = 'Net Sentiment (Pos - Neg)';
 
 // Store data received from backend, keyed by language
@@ -243,6 +243,19 @@ function connectWebSocket() {
 // --- Request Data Function ---
 function requestHistoryData() {
     if (socket && socket.readyState === WebSocket.OPEN) {
+        // Determine unique languages needed from plotted signals
+        const requiredLanguages = Array.from(new Set(plottedSignals.map(signal => signal.languageCode)));
+
+        // If no signals plotted, request nothing.
+        if (requiredLanguages.length === 0) {
+            console.log("No signals plotted. Not requesting history.");
+            // Clear chart data if no signals are plotted
+            if (chartInstances.sentimentChart) chartInstances.sentimentChart.data.datasets = [];
+            if (chartInstances.volumeChart) chartInstances.volumeChart.data.datasets = [];
+            updateCharts(); // Update to show empty charts
+            return;
+        }
+
         // Determine desired interval based on time window (similar to old downsampling logic)
         let desiredIntervalMs = AGGREGATION_INTERVAL_MS; // Default
         const oneDayMs = 24 * HOUR_MS;
@@ -255,12 +268,12 @@ function requestHistoryData() {
             desiredIntervalMs = MINUTE_MS;      // Request 1 min intervals
         }
 
-        console.log(`Requesting history for languages: ${selectedLanguages.join(', ')}, window: ${currentTimeWindowMs/60000}m, interval: ${desiredIntervalMs/1000}s`);
+        console.log(`Requesting history for languages: ${requiredLanguages.join(', ')}, window: ${currentTimeWindowMs/60000}m, interval: ${desiredIntervalMs/1000}s`);
 
         const requestMessage = {
             type: 'requestHistory',
             payload: {
-                languages: selectedLanguages,
+                languages: requiredLanguages,
                 timeWindowMs: currentTimeWindowMs,
                 desiredIntervalMs: desiredIntervalMs
             }
@@ -295,6 +308,45 @@ function createDatasetConfig(
         hidden: false, // Initially visible
         ...options // Merge custom options
     };
+}
+
+// Helper to get the specific metric value from a data entry
+function getMetricValue(entry: HistoryEntry | LiveUpdateEntry, metric: string, type: 'raw' | 'short' | 'long'): number | null {
+    let source: SentimentScores | null | undefined;
+    let count = entry.postCount; // Needed for raw normalization
+
+    switch (type) {
+        case 'raw':
+            source = entry.scores;
+            break;
+        case 'short':
+            source = entry.shortAvg;
+            count = 1; // MAs are already averaged, don't normalize again
+            break;
+        case 'long':
+            source = entry.longAvg;
+            count = 1; // MAs are already averaged, don't normalize again
+            break;
+    }
+
+    if (!source) return null; // Source MA might be null
+
+    let value: number | null | undefined = null;
+
+    if (metric === 'netSentiment') {
+        value = (source.positive ?? 0) - (source.negative ?? 0);
+    } else if (AVAILABLE_METRICS.hasOwnProperty(metric)) {
+        value = source[metric as keyof SentimentScores];
+    }
+
+    if (value == null) return null; // Value might be missing in source
+
+    // Normalize *only* raw scores if count > 0
+    if (type === 'raw') {
+        return count > 0 ? value / count : null;
+    } else {
+        return value; // Return MA values directly
+    }
 }
 
 // --- Chart Initialization ---
@@ -340,134 +392,82 @@ function createTimeAxisOptions(): any { // Use any for now, specific Chart.js ty
 }
 
 function initializeCharts() {
-    console.log("Initializing charts...");
+    console.log("Initializing simplified charts...");
 
-    // Get contexts for all charts
-    const contexts: { [key: string]: CanvasRenderingContext2D | null } = {
-        sentimentChart: (document.getElementById('sentimentChart') as HTMLCanvasElement)?.getContext('2d'),
-        volumeChart: (document.getElementById('volumeChart') as HTMLCanvasElement)?.getContext('2d'),
-    };
-    emotionKeys.forEach(key => {
-        contexts[key] = (document.getElementById(`chart-${key}`) as HTMLCanvasElement)?.getContext('2d');
-    });
+    const mainCtx = (document.getElementById('mainChart') as HTMLCanvasElement)?.getContext('2d');
+    const volumeCtx = (document.getElementById('volumeChart') as HTMLCanvasElement)?.getContext('2d');
 
-    // Check if all contexts were found
-    const allContextsFound = Object.values(contexts).every(ctx => ctx !== null);
-    if (!allContextsFound) {
-        console.error('Cannot find all required chart canvas elements. Check IDs in index.html.');
-        // Log which ones are missing
-        Object.entries(contexts).forEach(([key, ctx]) => {
-            if (!ctx) console.error(` - Missing context for chart ID: ${key === 'sentimentChart' || key === 'volumeChart' ? key : `chart-${key}`}`);
-        });
-        return;
-    }
+    if (!mainCtx) console.error('Failed to get 2D context for mainChart');
+    if (!volumeCtx) console.error('Failed to get 2D context for volumeChart');
+
+    // Destroy existing charts
+    chartInstances.sentimentChart?.destroy();
+    chartInstances.volumeChart?.destroy();
+    chartInstances.sentimentChart = null; // Explicitly nullify
+    chartInstances.volumeChart = null;
 
     const commonOptions = {
         responsive: true,
         maintainAspectRatio: false,
-        animation: false as const, // Use literal false for type compatibility
-        scales: {
-            x: createTimeAxisOptions()
-        },
+        animation: false as const,
+        scales: { x: createTimeAxisOptions() },
         plugins: {
-            legend: {
-                position: 'top' as const,
-                labels: { boxWidth: 12, font: { size: 10 } } // Smaller legend items
-            },
-            tooltip: {
-                mode: 'index' as InteractionMode,
-                intersect: false,
-            },
+            legend: { position: 'top' as const, labels: { boxWidth: 12, font: { size: 10 } } },
+            tooltip: { mode: 'index' as InteractionMode, intersect: false },
         },
-        interaction: { // Optimize interaction modes
-            mode: 'nearest' as InteractionMode,
-            axis: 'x' as const,
-            intersect: false
-        }
+        interaction: { mode: 'nearest' as InteractionMode, axis: 'x' as const, intersect: false }
     };
 
-    // Destroy existing charts if they exist
-    Object.keys(chartInstances).forEach(key => {
-        const chartKey = key as keyof typeof chartInstances;
-        if (chartInstances[chartKey]) {
-            chartInstances[chartKey]?.destroy();
-            chartInstances[chartKey] = null;
-        }
-    });
-
-
-    // --- Initialize Sentiment Chart --- (Net Score)
-    chartInstances.sentimentChart = new Chart(contexts.sentimentChart!, {
-        type: 'line',
-        data: { datasets: [] }, // Start with empty datasets
-        options: {
-            ...commonOptions,
-            plugins: {
-                 ...commonOptions.plugins,
-                 title: { display: true, text: 'Avg. Net Score' }
-            },
-            scales: {
-                 x: commonOptions.scales.x,
-                y: {
-                    title: { display: true, text: 'Avg. Net Score' }
-                }
-            }
-        }
-    });
-
-    // --- Initialize Volume Chart --- (Bar)
-    chartInstances.volumeChart = new Chart(contexts.volumeChart!, {
-        type: 'bar',
-        data: { datasets: [] },
-        options: {
-            ...commonOptions,
-             plugins: {
-                 ...commonOptions.plugins,
-                 title: { display: true, text: 'Post Volume' }
-            },
-            scales: {
-                 x: {
-                    ...commonOptions.scales.x, // Inherit time axis options
-                    stacked: true // <<< Enable stacking on X axis
-                },
-                y: {
-                    stacked: true, // <<< Enable stacking on Y axis
-                    beginAtZero: true,
-                    title: { display: true, text: 'Posts per Interval' }
-                }
-            },
-            datasets: {
-                bar: {
-                     barPercentage: 0.9,
-                     categoryPercentage: 0.85
-                 }
-            }
-        }
-    });
-
-    // --- Initialize Individual Emotion Charts --- (Line)
-    emotionKeys.forEach(key => {
-        chartInstances[key] = new Chart(contexts[key]!, {
-            type: 'line',
-            data: { datasets: [] },
-            options: {
-                 ...commonOptions,
-                 plugins: {
-                     ...commonOptions.plugins,
-                     title: { display: true, text: key.charAt(0).toUpperCase() + key.slice(1) } // Capitalize title
-                 },
-                 scales: {
-                    x: commonOptions.scales.x,
-                    y: {
-                        beginAtZero: true,
-                        title: { display: true, text: 'Avg. Score' }
+    // --- Initialize Main Chart (Line) ---
+    if (mainCtx) {
+        try {
+            chartInstances.sentimentChart = new Chart(mainCtx, {
+                type: 'line',
+                data: { datasets: [] }, // Start empty
+                options: {
+                    ...commonOptions,
+                    plugins: { ...commonOptions.plugins, title: { display: true, text: 'Sentiment Trends' } },
+                    scales: {
+                        x: commonOptions.scales.x,
+                        y: { title: { display: true, text: 'Score / Avg. Score' } } // Generic Y-axis label
                     }
                 }
-            }
-        });
-    });
+            });
+            console.log("Main chart instance created.");
+        } catch (error) {
+            console.error("Error creating main chart:", error);
+            chartInstances.sentimentChart = null; // Ensure it's null if creation failed
+        }
+    } else {
+        console.error("Cannot initialize main chart - context not available.");
+    }
 
-    console.log("All charts initialized with dynamic Y-axes.");
+    // --- Initialize Volume Chart (Bar) ---
+    if (volumeCtx) {
+         try {
+            chartInstances.volumeChart = new Chart(volumeCtx, {
+                type: 'bar',
+                data: { datasets: [] }, // Start empty
+                options: {
+                    ...commonOptions,
+                    plugins: { ...commonOptions.plugins, title: { display: true, text: 'Post Volume' } },
+                    scales: {
+                        x: { ...commonOptions.scales.x, stacked: true }, // Stack on time axis
+                        y: { stacked: true, beginAtZero: true, title: { display: true, text: 'Posts per Interval' } }
+                    },
+                    datasets: { bar: { barPercentage: 0.9, categoryPercentage: 0.85 } }
+                }
+            });
+            console.log("Volume chart instance created.");
+         } catch (error) {
+             console.error("Error creating volume chart:", error);
+             chartInstances.volumeChart = null; // Ensure it's null if creation failed
+         }
+    } else {
+         console.error("Cannot initialize volume chart - context not available.");
+    }
+
+    // console.log("Chart initialization complete."); // Changed log location
 }
 
 // --- Chart Update Logic ---
@@ -492,19 +492,12 @@ function updateCharts() {
 
 // Process historical data and update charts completely
 function handleHistoryData(results: LanguageHistoryData[]) {
-    console.log("Processing historyData...");
+    console.log("Processing historyData for dynamic signals...");
+    // *** DEBUG: Log the state of plottedSignals ***
+    console.log("Current plottedSignals:", JSON.stringify(plottedSignals));
 
-    // *** ADDED: Log received MA data for debugging ***
-    if (results.length > 0 && results[0].data.length > 0) {
-        console.log("Sample received history entry[0]:", results[0].data[0]);
-        if (results[0].data.length > 1) {
-             console.log("Sample received history entry[1]:", results[0].data[1]);
-        }
-    }
-
-    // Check if charts are initialized
     if (!chartInstances.sentimentChart || !chartInstances.volumeChart) {
-        console.error("Primary charts not initialized, cannot handle history data.");
+        console.error("Charts not initialized, cannot handle history data.");
         return;
     }
 
@@ -514,166 +507,84 @@ function handleHistoryData(results: LanguageHistoryData[]) {
         currentChartData[result.language] = result.data;
     });
 
-    // 2. Identify language changes (works across all charts, assuming they stay in sync)
-    const currentLanguages = new Set<string>(
-        chartInstances.sentimentChart.data.datasets.map(ds => (ds as any).languageCode).filter(Boolean)
-    );
-    const selectedSet = new Set<string>(selectedLanguages);
-    const languagesToAdd = selectedLanguages.filter(lang => !currentLanguages.has(lang));
-    const languagesToRemove = Array.from(currentLanguages).filter(lang => !selectedSet.has(lang));
+    // 2. Clear existing datasets from charts
+    // *** DEBUG: Log dataset counts before/after clear ***
+    const sentimentChartDatasetsBefore = chartInstances.sentimentChart.data.datasets.length;
+    const volumeChartDatasetsBefore = chartInstances.volumeChart.data.datasets.length;
+    console.log(`Datasets before clear - Sentiment: ${sentimentChartDatasetsBefore}, Volume: ${volumeChartDatasetsBefore}`);
 
-    // Debug logs for language changes
-    // console.log(`Selected: [${selectedLanguages.join(', ')}]`);
-    // console.log(`Currently displayed: [${Array.from(currentLanguages).join(', ')}]`);
-    // console.log(` -> Adding: [${languagesToAdd.join(', ')}]`);
-    // console.log(` -> Removing: [${languagesToRemove.join(', ')}]`);
+    chartInstances.sentimentChart.data.datasets = [];
+    chartInstances.volumeChart.data.datasets = [];
 
-    // Helper to filter datasets by language
-    const filterDatasets = (chart: Chart | null) => {
-        if (chart) {
-            chart.data.datasets = chart.data.datasets.filter(ds =>
-                !languagesToRemove.includes((ds as any).languageCode)
-            );
+    const sentimentChartDatasetsAfterClear = chartInstances.sentimentChart.data.datasets.length;
+    const volumeChartDatasetsAfterClear = chartInstances.volumeChart.data.datasets.length;
+    console.log(`Datasets after clear - Sentiment: ${sentimentChartDatasetsAfterClear}, Volume: ${volumeChartDatasetsAfterClear}`);
+
+    // 3. Rebuild datasets based on plottedSignals
+    console.log("Rebuilding datasets based on plottedSignals...");
+
+    // Volume Chart Data
+    const requiredLangsForVolume = new Set<string>();
+    plottedSignals.forEach(s => requiredLangsForVolume.add(s.languageCode));
+
+    requiredLangsForVolume.forEach(lang => {
+        if (!currentChartData[lang]) {
+             console.log(` -> Skipping volume for ${lang}: No data received.`);
+             return;
         }
-    };
-
-    // 3. Remove datasets for deselected languages from ALL charts
-    filterDatasets(chartInstances.sentimentChart);
-    filterDatasets(chartInstances.volumeChart);
-    emotionKeys.forEach(key => filterDatasets(chartInstances[key]));
-
-    // Helper to calculate normalized score (ONLY for raw scores)
-    const normalizeScore = (score: number | null | undefined, count: number): number | null => {
-        if (count > 0 && score != null) {
-            return score / count;
-        }
-        return null;
-    };
-
-    // 4. Add datasets (Normalize Raw, Plot MA Direct)
-    languagesToAdd.forEach(lang => {
-        if (!currentChartData[lang]) return; // Skip if no data for this lang
+        console.log(` -> Adding volume dataset for ${lang}`);
         const langData = currentChartData[lang];
-        const langName = lang.toUpperCase();
+        const volumeData = langData.map(e => ({ x: e.timestamp, y: e.postCount }));
+        const volumeColor = getLanguageColor(lang);
+        chartInstances.volumeChart!.data.datasets.push(
+            createDatasetConfig(lang, `${lang.toUpperCase()} Volume`, volumeData, volumeColor, { type: 'bar' })
+        );
+    });
+    sortVolumeDatasets(chartInstances.volumeChart); // Sort before update
 
-        // --- Add to Sentiment Chart ---
-        if (chartInstances.sentimentChart) {
-            // Prepare args for Net Score
-            const netScoreData = langData.map(e => ({ x: e.timestamp, y: normalizeScore((e.scores.positive ?? 0) - (e.scores.negative ?? 0), e.postCount) }));
-            const netScoreColor = getLanguageColor(lang).replace(', 1)', ', 0.4)');
-            const netScoreOptions = { borderWidth: 1 };
-            chartInstances.sentimentChart.data.datasets.push(
-                createDatasetConfig(lang, `${langName} Net Score`, netScoreData, netScoreColor, netScoreOptions)
-            );
+    // Main Chart Data
+    plottedSignals.forEach(signal => {
+        if (!currentChartData[signal.languageCode]) {
+             console.log(` -> Skipping main chart signal ${signal.id}: No data received for ${signal.languageCode}.`);
+             return;
+        }
+        console.log(` -> Processing main chart signal ${signal.id} (${signal.languageCode} - ${signal.metric} - ${signal.color})`);
+        const langData = currentChartData[signal.languageCode];
 
-            // Prepare args for Net Score Short MA
-            const shortMAData = langData.map(e => ({ x: e.timestamp, y: e.shortAvg ? (e.shortAvg.positive ?? 0) - (e.shortAvg.negative ?? 0) : null }));
-            const shortMAColor = getLanguageColor(lang).replace(', 1)', ', 0.7)');
-            const shortMAOptions = { borderDash: [5, 5], borderWidth: 1.5 };
-            chartInstances.sentimentChart.data.datasets.push(
-                createDatasetConfig(lang, `${langName} Short MA`, shortMAData, shortMAColor, shortMAOptions)
-            );
-
-            // Prepare args for Net Score Long MA
-            const longMAData = langData.map(e => ({ x: e.timestamp, y: e.longAvg ? (e.longAvg.positive ?? 0) - (e.longAvg.negative ?? 0) : null }));
-            const longMAColor = getLanguageColor(lang);
-            const longMAOptions = { borderWidth: 2.5 };
-            chartInstances.sentimentChart.data.datasets.push(
-                createDatasetConfig(lang, `${langName} Long MA`, longMAData, longMAColor, longMAOptions)
+        // Add Raw Score dataset if requested
+        if (signal.showRaw) {
+            console.log(`   * Adding Raw dataset`);
+            const rawData = langData.map(e => ({ x: e.timestamp, y: getMetricValue(e, signal.metric, 'raw') }));
+            chartInstances.sentimentChart!.data.datasets.push(
+                createSignalDatasetConfig(signal, 'raw', rawData) as any
             );
         }
-
-        // --- Add to Volume Chart ---
-        if (chartInstances.volumeChart) {
-            const volumeData = langData.map(e => ({ x: e.timestamp, y: e.postCount }));
-            const volumeColor = getLanguageColor(lang);
-            const volumeOptions = { type: 'bar' };
-            chartInstances.volumeChart.data.datasets.push(
-                createDatasetConfig(lang, `${langName} Volume`, volumeData, volumeColor, volumeOptions)
+        // Add Short MA dataset if requested
+        if (signal.showShortMA) {
+             console.log(`   * Adding Short MA dataset`);
+            const shortMAData = langData.map(e => ({ x: e.timestamp, y: getMetricValue(e, signal.metric, 'short') }));
+            chartInstances.sentimentChart!.data.datasets.push(
+                createSignalDatasetConfig(signal, 'short', shortMAData) as any
             );
         }
-
-        // --- Add to Individual Emotion Charts ---
-        emotionKeys.forEach(emotion => {
-            const chart = chartInstances[emotion];
-            if (chart) {
-                const baseColor = getLanguageColor(lang);
-
-                // Prepare args for Raw Score
-                const scoreData = langData.map(e => ({ x: e.timestamp, y: normalizeScore(e.scores[emotion], e.postCount) }));
-                const scoreColor = baseColor.replace(', 1)', ', 0.4)');
-                const scoreOptions = { borderWidth: 1 };
-                 chart.data.datasets.push(
-                     createDatasetConfig(lang, `${langName} Score`, scoreData, scoreColor, scoreOptions)
-                 );
-
-                 // Prepare args for Short MA
-                 const shortMAData = langData.map(e => ({ x: e.timestamp, y: e.shortAvg ? e.shortAvg[emotion] : null }));
-                 const shortMAColor = baseColor.replace(', 1)', ', 0.7)');
-                 const shortMAOptions = { borderDash: [5, 5], borderWidth: 1.5 };
-                 chart.data.datasets.push(
-                     createDatasetConfig(lang, `${langName} Short MA`, shortMAData, shortMAColor, shortMAOptions)
-                 );
-
-                 // Prepare args for Long MA
-                 const longMAData = langData.map(e => ({ x: e.timestamp, y: e.longAvg ? e.longAvg[emotion] : null }));
-                 const longMAColor = baseColor;
-                 const longMAOptions = { borderWidth: 2.5 };
-                 chart.data.datasets.push(
-                     createDatasetConfig(lang, `${langName} Long MA`, longMAData, longMAColor, longMAOptions)
-                 );
-            }
-        });
+        // Add Long MA dataset if requested
+        if (signal.showLongMA) {
+             console.log(`   * Adding Long MA dataset`);
+            const longMAData = langData.map(e => ({ x: e.timestamp, y: getMetricValue(e, signal.metric, 'long') }));
+            chartInstances.sentimentChart!.data.datasets.push(
+                createSignalDatasetConfig(signal, 'long', longMAData) as any
+            );
+        }
     });
 
-    // 5. Update data (Normalize Raw, Plot MA Direct)
-    const languagesToUpdate = Array.from(currentLanguages).filter(lang => selectedSet.has(lang));
-    languagesToUpdate.forEach(lang => {
-        if (!currentChartData[lang]) return;
-        const langData = currentChartData[lang];
+    // *** DEBUG: Log dataset count after rebuild ***
+    const sentimentChartDatasetsAfterRebuild = chartInstances.sentimentChart.data.datasets.length;
+    const volumeChartDatasetsAfterRebuild = chartInstances.volumeChart.data.datasets.length;
+    console.log(`Datasets after rebuild - Sentiment: ${sentimentChartDatasetsAfterRebuild}, Volume: ${volumeChartDatasetsAfterRebuild}`);
 
-        // Helper function to update datasets
-        const updateChartDatasets = (chart: Chart | null, getDataFunc: (entry: HistoryEntry, type: 'score' | 'short' | 'long') => number | null) => {
-            if (!chart) return;
-            chart.data.datasets.forEach(ds => {
-                const dataset = ds as any;
-                if (dataset.languageCode === lang) {
-                    if (dataset.label.includes('Score')) {
-                        // Normalize raw score
-                        dataset.data = langData.map(entry => ({ x: entry.timestamp, y: normalizeScore(getDataFunc(entry, 'score'), entry.postCount) }));
-                    } else if (dataset.label.includes('Short MA')) {
-                         // Plot MA directly
-                        dataset.data = langData.map(entry => ({ x: entry.timestamp, y: getDataFunc(entry, 'short') }));
-                    } else if (dataset.label.includes('Long MA')) {
-                         // Plot MA directly
-                        dataset.data = langData.map(entry => ({ x: entry.timestamp, y: getDataFunc(entry, 'long') }));
-                    }
-                }
-            });
-        };
-
-        // Update Sentiment Chart (Raw Normalized, MA Direct)
-        updateChartDatasets(chartInstances.sentimentChart, (e, type) => {
-            const source = type === 'score' ? e.scores : (type === 'short' ? e.shortAvg : e.longAvg);
-            return source ? (source.positive ?? 0) - (source.negative ?? 0) : null;
-        });
-
-        // Update Volume Chart
-        updateChartDatasets(chartInstances.volumeChart, (e, type) => type === 'score' ? e.postCount : null);
-
-        // Update Emotion Charts (Raw Normalized, MA Direct)
-        emotionKeys.forEach(emotion => {
-            updateChartDatasets(chartInstances[emotion], (e, type) => {
-                const source = type === 'score' ? e.scores : (type === 'short' ? e.shortAvg : e.longAvg);
-                 return source ? source[emotion] : null;
-            });
-        });
-    });
-
-    // 6. Trigger chart update for all charts
-    sortVolumeDatasets(chartInstances.volumeChart); // <<< Sort before updating
-    Object.values(chartInstances).forEach(chart => chart?.update());
-    console.log("All charts updated with new history data.");
+    // 4. Trigger chart update for all charts
+    updateCharts(); // This calls chart.update() internally after setting time scale
+    console.log("Charts updated with dynamically plotted signals from history.");
 }
 
 // Handle incoming live data points (Normalize Raw, Plot MA Direct)
@@ -809,51 +720,118 @@ function sortVolumeDatasets(chart: Chart | null) {
     chart.data.datasets.forEach((dataset: any) => delete dataset.totalVolume);
 }
 
-// --- UI Controls Setup ---
+// --- UI Controls Setup --- (Refactored)
 function setupControls() {
-    const languageSelector = document.getElementById('languageSelector');
+    console.log("Setting up controls..."); // Add entry log
+
+    const addSignalBtn = document.getElementById('addSignalBtn');
+    const signalSelectorDiv = document.getElementById('signalSelector');
+    const langSelect = document.getElementById('langSelect') as HTMLSelectElement;
+    const metricSelect = document.getElementById('metricSelect') as HTMLSelectElement;
+    const showRawCheckbox = document.getElementById('showRaw') as HTMLInputElement;
+    const showShortMACheckbox = document.getElementById('showShortMA') as HTMLInputElement;
+    const showLongMACheckbox = document.getElementById('showLongMA') as HTMLInputElement;
+    const confirmSignalBtn = document.getElementById('confirmSignalBtn');
+    const cancelSignalBtn = document.getElementById('cancelSignalBtn');
     const timeWindowSelect = document.getElementById('timeWindowSelect') as HTMLSelectElement;
+    const signalColorInput = document.getElementById('signalColor') as HTMLInputElement; // Get color input
 
-    // Populate Language Selector
-    if (languageSelector) {
+    // *** DEBUGGING: Check if elements are found ***
+    console.log("Add Signal Button:", addSignalBtn);
+    console.log("Signal Selector Div:", signalSelectorDiv);
+    console.log("Signal Color Input:", signalColorInput);
+
+    // *** ADDED: Set default color programmatically ***
+    if (signalColorInput) {
+        signalColorInput.value = '#007bff'; // Set default blue
+    }
+
+    // Populate Language Selector Dropdown
+    if (langSelect) {
+        langSelect.innerHTML = ''; // Clear previous options
         AVAILABLE_LANGUAGES.forEach(lang => {
-            const div = document.createElement('div');
-            div.classList.add('language-option');
-            const checkbox = document.createElement('input');
-            checkbox.type = 'checkbox';
-            checkbox.id = `lang-${lang.code}`;
-            checkbox.value = lang.code;
-            checkbox.checked = selectedLanguages.includes(lang.code);
-            checkbox.addEventListener('change', (event) => {
-                 const target = event.target as HTMLInputElement;
-                const langCode = target.value;
-                if (target.checked) {
-                    if (!selectedLanguages.includes(langCode)) {
-                        selectedLanguages.push(langCode);
-                    }
-                } else {
-                    selectedLanguages = selectedLanguages.filter(code => code !== langCode);
-                }
-                console.log("Selected languages:", selectedLanguages);
-                requestHistoryData(); // Request new data when selection changes
-            });
-
-            const label = document.createElement('label');
-            label.htmlFor = `lang-${lang.code}`;
-            label.textContent = lang.name;
-
-            div.appendChild(checkbox);
-            div.appendChild(label);
-            languageSelector.appendChild(div);
+            const option = document.createElement('option');
+            option.value = lang.code;
+            option.textContent = lang.name;
+            if (lang.code === 'eng') option.selected = true; // Default to English
+            langSelect.appendChild(option);
         });
     }
 
-    // Time Window Selector
-    if (timeWindowSelect) {
-         // Set initial value from state
-         timeWindowSelect.value = (currentTimeWindowMs / HOUR_MS).toString();
+    // Populate Metric Selector Dropdown
+    if (metricSelect) {
+        Object.entries(AVAILABLE_METRICS).forEach(([key, value]) => {
+            const option = document.createElement('option');
+            option.value = key;
+            option.textContent = value;
+            metricSelect.appendChild(option);
+        });
+    }
 
-         timeWindowSelect.addEventListener('change', () => {
+    // Add Signal Button Listener
+    addSignalBtn?.addEventListener('click', () => {
+        // *** DEBUGGING: Check if listener fires ***
+        console.log("Add Signal Button clicked!");
+        console.log("Signal Selector Div before display change:", signalSelectorDiv);
+        if (signalSelectorDiv) {
+            signalSelectorDiv.style.display = 'block';
+            console.log("Set signalSelectorDiv display to block.");
+        } else {
+            console.error("Cannot show signal selector: signalSelectorDiv not found.");
+        }
+    });
+
+    // Cancel Signal Button Listener
+    cancelSignalBtn?.addEventListener('click', () => {
+        // *** DEBUGGING: Check if listener fires ***
+        console.log("Cancel Signal Button clicked!");
+        if (signalSelectorDiv) signalSelectorDiv.style.display = 'none';
+    });
+
+    // Confirm Signal Button Listener
+    confirmSignalBtn?.addEventListener('click', () => {
+         console.log("Confirm Signal Button clicked!");
+        // *** Read color picker value ***
+        if (langSelect && metricSelect && showRawCheckbox && showShortMACheckbox && showLongMACheckbox && signalColorInput) {
+            // *** DEBUG: Log the color input value ***
+            console.log(`Reading color input value: ${signalColorInput.value}`);
+            const selectedColor = signalColorInput.value;
+            const newSignal: PlottedSignalConfig = {
+                id: `${langSelect.value}-${metricSelect.value}-${Date.now()}`,
+                languageCode: langSelect.value,
+                metric: metricSelect.value,
+                color: selectedColor, // *** Store selected color ***
+                showRaw: showRawCheckbox.checked,
+                showShortMA: showShortMACheckbox.checked,
+                showLongMA: showLongMACheckbox.checked,
+            };
+            // *** ADDED BACK: Check for duplicates ***
+            const isDuplicate = plottedSignals.some(s =>
+                s.languageCode === newSignal.languageCode &&
+                s.metric === newSignal.metric &&
+                s.color === newSignal.color && // Include color in duplicate check?
+                s.showRaw === newSignal.showRaw &&
+                s.showShortMA === newSignal.showShortMA &&
+                s.showLongMA === newSignal.showLongMA
+            );
+
+            if (!isDuplicate) {
+                plottedSignals.push(newSignal);
+                updatePlottedSignalsUI(); // Update the list display
+                requestHistoryData(); // Request new data for the updated signal set
+            } else {
+                console.log("Signal configuration already exists.");
+            }
+        }
+        if (signalSelectorDiv) signalSelectorDiv.style.display = 'none'; // Hide selector
+    });
+
+    // Time Window Selector (No change needed in listener logic)
+    if (timeWindowSelect) {
+        // Set initial value from state
+        timeWindowSelect.value = (currentTimeWindowMs / HOUR_MS).toString();
+
+        timeWindowSelect.addEventListener('change', () => {
             const selectedHours = parseFloat(timeWindowSelect.value);
             if (isNaN(selectedHours)) {
                 console.error(`Invalid time window value: ${timeWindowSelect.value}`);
@@ -864,13 +842,178 @@ function setupControls() {
             requestHistoryData();
         });
     }
+
+    // Initial UI update for plotted signals list
+    updatePlottedSignalsUI();
+
+    console.log("Controls setup complete."); // Add exit log
 }
 
+// Available Metrics for Selection
+const AVAILABLE_METRICS: { [key: string]: string } = {
+    netSentiment: 'Net Sentiment (Pos-Neg)',
+    anger: 'Anger',
+    anticipation: 'Anticipation',
+    disgust: 'Disgust',
+    fear: 'Fear',
+    joy: 'Joy',
+    sadness: 'Sadness',
+    surprise: 'Surprise',
+    trust: 'Trust',
+};
+const emotionKeys = Object.keys(AVAILABLE_METRICS).filter(k => k !== 'netSentiment'); // Helper
+
+// Configuration for a single plotted signal
+interface PlottedSignalConfig {
+    id: string; // Unique ID for removal, e.g., "lang-metric-timestamp"
+    languageCode: string;
+    metric: string; // e.g., 'netSentiment', 'anger', 'joy'
+    color: string; // *** ADDED: User-selected color ***
+    showRaw: boolean;
+    showShortMA: boolean;
+    showLongMA: boolean;
+}
+
+// Store configurations of currently plotted signals
+// *** Initialize with a default signal including color ***
+let plottedSignals: PlottedSignalConfig[] = [
+    {
+        id: `eng-netSentiment-${Date.now()}`,
+        languageCode: 'eng',
+        metric: 'netSentiment',
+        color: '#007bff', // Default blue color
+        showRaw: true,
+        showShortMA: true,
+        showLongMA: true
+    }
+];
+
+// *** Function to Update the Plotted Signals List in the UI (Moved Earlier, Type Added) ***
+function updatePlottedSignalsUI() {
+    const listContainer = document.getElementById('plottedSignalsList');
+    if (!listContainer) return;
+
+    listContainer.innerHTML = ''; // Clear current list
+
+    if (plottedSignals.length === 0) {
+        listContainer.innerHTML = '<p>No signals added yet.</p>';
+        return;
+    }
+
+    const ul = document.createElement('ul');
+    plottedSignals.forEach(signal => {
+        const li = document.createElement('li');
+        const metricName = AVAILABLE_METRICS[signal.metric] || signal.metric;
+        let types: string[] = []; // *** Added explicit type annotation ***
+        if (signal.showRaw) types.push('Raw');
+        if (signal.showShortMA) types.push('5m');
+        if (signal.showLongMA) types.push('1h');
+
+        // *** ADD: Color indicator span ***
+        const colorIndicator = document.createElement('span');
+        colorIndicator.style.display = 'inline-block';
+        colorIndicator.style.width = '10px';
+        colorIndicator.style.height = '10px';
+        colorIndicator.style.borderRadius = '50%';
+        colorIndicator.style.backgroundColor = signal.color;
+        colorIndicator.style.marginRight = '8px';
+        colorIndicator.style.verticalAlign = 'middle'; // Align with text
+
+        const signalText = document.createElement('span');
+        signalText.textContent = `${signal.languageCode.toUpperCase()} - ${metricName} (${types.join(', ')})`;
+        signalText.style.verticalAlign = 'middle';
+
+        const removeBtn = document.createElement('button');
+        removeBtn.textContent = '✖';
+        removeBtn.classList.add('remove-signal-btn');
+        removeBtn.title = 'Remove Signal';
+        removeBtn.addEventListener('click', () => {
+            plottedSignals = plottedSignals.filter(s => s.id !== signal.id);
+            updatePlottedSignalsUI(); // Re-render the list
+            requestHistoryData(); // Fetch data for the new set of signals
+        });
+
+        // *** Prepend color indicator ***
+        li.appendChild(colorIndicator);
+        li.appendChild(signalText);
+        li.appendChild(removeBtn);
+        ul.appendChild(li);
+    });
+    listContainer.appendChild(ul);
+}
+
+// Helper to get style based on signal's color and type
+function getSignalStyle(signalColor: string, type: 'raw' | 'short' | 'long'): { color: string, borderDash?: number[], borderWidth: number, tension?: number, pointRadius?: number, pointHoverRadius?: number } {
+    const baseColor = signalColor; // Use the signal's specific color
+    switch (type) {
+        case 'raw':
+            // Make raw line very faint using RGBA - assuming baseColor is hex
+            const rawRgba = hexToRgba(baseColor, 0.3);
+            return { color: rawRgba, borderWidth: 1, tension: 0.1, pointRadius: 0, pointHoverRadius: 2 };
+        case 'short':
+            const shortRgba = hexToRgba(baseColor, 0.7);
+            return { color: shortRgba, borderDash: [5, 5], borderWidth: 1.5, tension: 0.1, pointRadius: 1, pointHoverRadius: 3 }; // Dashed, medium thickness
+        case 'long':
+             const longRgba = hexToRgba(baseColor, 1); // Solid
+            return { color: longRgba, borderWidth: 2.5, tension: 0.1, pointRadius: 1, pointHoverRadius: 3 }; // Solid, thickest
+    }
+}
+
+// *** ADDED: Helper to convert HEX to RGBA ***
+function hexToRgba(hex: string, alpha: number): string {
+    let r = 0, g = 0, b = 0;
+    // 3 digits
+    if (hex.length === 4) {
+        r = parseInt(hex[1] + hex[1], 16);
+        g = parseInt(hex[2] + hex[2], 16);
+        b = parseInt(hex[3] + hex[3], 16);
+    // 6 digits
+    } else if (hex.length === 7) {
+        r = parseInt(hex.substring(1, 3), 16);
+        g = parseInt(hex.substring(3, 5), 16);
+        b = parseInt(hex.substring(5, 7), 16);
+    }
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+// Helper to create dataset configuration (Refactored labels and color usage)
+function createSignalDatasetConfig(
+    signal: PlottedSignalConfig,
+    type: 'raw' | 'short' | 'long',
+    data: { x: number, y: number | null }[]
+): ChartDataset<'line', { x: number, y: number | null }[]> { // Use specific Chart.js type
+    const style = getSignalStyle(signal.color, type); // Pass signal's color
+    const metricName = AVAILABLE_METRICS[signal.metric] || signal.metric;
+    let typeLabel = '';
+    switch (type) {
+        case 'raw': typeLabel = 'Raw'; break;
+        case 'short': typeLabel = '5m'; break;
+        case 'long': typeLabel = '1h'; break;
+    }
+
+    // *** Use 'as any' to allow custom properties and simplify type compatibility ***
+    return {
+        // Custom properties for identification
+        signalId: signal.id,
+        datasetType: type,
+        // Standard Chart.js properties
+        label: `${signal.languageCode.toUpperCase()} ${metricName} (${typeLabel})`, // More specific label
+        data: data,
+        borderColor: style.color,
+        backgroundColor: style.color.replace(/,[^,]+?\)$/, ', 0.1)'), // Regex to set alpha to 0.1
+        borderWidth: style.borderWidth,
+        borderDash: style.borderDash,
+        pointRadius: style.pointRadius ?? 1,
+        pointHoverRadius: style.pointHoverRadius ?? 3,
+        tension: style.tension ?? 0.1,
+        hidden: false,
+    } as any; // <<< Cast to any here
+}
 
 // --- Initialization ---
 document.addEventListener('DOMContentLoaded', () => {
-    console.log("DOM Content Loaded");
-    initializeCharts();
-    setupControls();
-    connectWebSocket(); // Connect after setting up UI and charts
+    console.log("DOM Content Loaded - Initializing dynamic signal plotting UI");
+    initializeCharts(); // Initialize the two base charts
+    setupControls();    // Setup controls, including signal selector logic
+    connectWebSocket(); // Connect WebSocket
 });
