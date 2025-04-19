@@ -206,73 +206,51 @@ This document outlines the plan to build a real-time dashboard that monitors Blu
     *   Deployed the application (`fly deploy`).
     *   Monitored logs (`fly logs`) for debugging.
 
-13. **Multi-Language Comparison (Server-Side Processing) (In Progress):**
+13. **Multi-Language Comparison (Server-Side Processing) (✅ Completed):**
     *   **Goal:** Allow users to select multiple languages and view their sentiment trends overlaid on the same charts, with aggregation and moving averages calculated efficiently on the backend.
     *   **Rationale:** Offloading aggregation and MA calculations to the server significantly reduces frontend load, improves performance (especially on long time scales), simplifies frontend logic, and aligns with common practices for time-series dashboards.
-    *   **13.1: Backend - Lexicon Loading & Parsing (✅ Completed):**
-        *   Modified `src/sentiment.ts` to parse the single consolidated `NRC-Emotion-Lexicon-ForVariousLanguages.txt`.
-        *   Loads all languages identified in the header into `Map<string, NrcLexicon>`.
-        *   Requires maintaining `francToNrcMap` mapping.
-    *   **13.1.1: Backend - Language Filtering (✅ Completed):**
-        *   Filtered `francToNrcMap` in `src/sentiment.ts` to ~20 target languages (prioritizing those with stemmers + high-usage internet languages).
-        *   Analysis will now only proceed for posts detected in one of these target languages.
-        *   Updated `stemmersByLanguage` map to only include stemmers for the filtered target languages.
-    *   **13.2: Backend - Language-Specific Analysis & Stemming (✅ Completed):**
-        *   Modify `src/sentiment.ts`: Update `analyzeSentiment` signature to accept `language` code; use the map to select the correct lexicon.
-        *   Import `PorterStemmer` and other available language stemmers (Fr, Es, It, Nl, Pt, Sv, No, Ru) from `natural`.
-        *   Create map associating language names with stemmer classes.
-        *   In `analyzeSentiment`, look up stemmer by language name and apply `.stem(token)` before lexicon lookup if stemmer exists.
-        *   Stemming is applied only for languages where `natural` provides a stemmer.
-    *   **13.3: Backend - Database Schema Update (✅ Completed):**
-        *   Modify `src/server.ts` (`initializeDatabase`): Add `language VARCHAR(10)` column, change PK to `(timestamp, language)`, update index.
-    *   **13.4: Backend - Process All Languages (✅ Completed):**
-        *   Modify `src/server.ts` (`processPost`): Remove English filter.
-        *   Modify `src/server.ts`: Update aggregation accumulators (`currentIntervalScores`, `currentIntervalPostCount`) to be language-keyed maps.
-    *   **13.5: Backend - Store Language Data (✅ Completed):**
-        *   Modify `src/server.ts` (`aggregateAndStore`): Loop through accumulated languages, `INSERT` rows tagged with `language`.
-    *   **13.6: Backend - Server-Side Aggregation Function (✅ Completed):**
-        *   Implement `getAggregatedData(languages, startTime, endTime, intervalMs)` in `src/server.ts`: Queries raw DB data, aggregates into buckets based on `intervalMs`.
-    *   **13.7: Backend - Server-Side Moving Average Function (✅ Completed):**
-        *   Implement `calculateMAsForAggregatedData(aggregatedData, intervalMs, shortWindowMs, longWindowMs)` in `src/server.ts`: Calculates MAs on *already aggregated* data.
-        *   Extracted reusable `calculateNumericMovingAverage` and `calculateSentimentMovingAverage` helpers.
-    *   **13.8: Backend - WebSocket Protocol & Handlers (✅ Completed):**
-        *   Define `requestHistory`, `historyData`, `liveUpdate` message structures.
-        *   Implement `requestHistory` handler in `wss.onmessage` (calling aggregation/MA functions and sending `historyData`).
-        *   Modify `aggregateAndStore` to broadcast `liveUpdate` message (containing latest 10s aggregates, *not* MAs for simplicity).
-    *   **13.9: Frontend - Language Selection UI (✅ Completed):**
-        *   Add HTML controls (div#language-checkboxes).
-        *   Define `AVAILABLE_LANGUAGES` constant in `public/app.ts`.
-        *   Dynamically populate checkboxes in `setupControls`.
-        *   Add `selectedLanguages` state and event listeners to update it.
-    *   **13.10: Frontend - Data Request Logic (✅ Completed):**
-        *   Implement `requestHistoryData()` in `public/app.ts` to send `requestHistory` message with selected languages, time window, and calculated interval.
-        *   Call `requestHistoryData()` on initial WebSocket connection and when languages or time window change.
-    *   **13.11: Frontend - Chart Data Handling & Dynamic Datasets (✅ Completed):**
-        *   Modify `public/app.ts` (`socket.onmessage`): Handle `historyData`, `liveUpdate`.
-        *   Implement `handleHistoryData`:
-            *   Clears existing chart datasets.
-            *   Stores received data keyed by language.
-            *   Iterates selected languages, creating MA datasets (short/long) with unique colors.
-            *   Populates datasets with server-calculated MA data.
-            *   Updates chart labels.
-        *   Implement `handleLiveUpdate` (Initial Version - Option A):
-            *   Logs received updates but does *not* modify chart data/datasets (MAs not included in live update).
-            *   Chart updates rely on `historyData` received via `requestHistoryData`.
-        *   Remove client-side `calculateMovingAverage` function.
+    *   **13.1 - 13.8: Backend Logic (✅ Completed):** Implemented multi-language lexicon loading, stemming, DB storage, server-side aggregation/MA calculation, and updated WebSocket protocol.
+    *   **13.9 - 13.11: Frontend Logic (✅ Completed):** Implemented language selection UI, history request logic, and dynamic dataset handling to display multiple languages overlaid on 10 separate charts (Net Sentiment, Volume, 8 Emotions). Corrected normalization and MA calculations.
 
-**Future Enhancements (Refined):**
+13.12 **Standardize MA Calculation Logic (✅ DONE):**
+    *   **Backend (`src/server.ts`):** Modify historical MA calculation (`calculateSentimentMovingAverage`) to use the post-weighted average method (`Sum(scores) / Sum(postCount)` over the window), consistent with the live incremental calculation.
+    *   **Goal:** Ensure live and historical MA values represent the same metric.
 
-*   **Data Persistence (✅ Completed):** Implemented using Fly Postgres.
-*   **Emoji Sentiment:** Integrate emoji sentiment analysis (e.g., using a dedicated library).
-*   **Advanced Filtering:** Allow filtering by keywords, users, or time ranges on the dashboard.
-*   **Improved Language Handling:** More sophisticated language detection/filtering (e.g., confidence scores).
-*   **UI/UX:** Enhance dashboard appearance, add loading indicators, improve chart interactions.
-*   **Robust Static Serving:** Use a more robust method for serving static files (e.g., `express.static` if migrating to Express framework).
-*   **Error Handling:** Implement more specific error handling for sentiment analysis, file loading, and network issues.
-*   **Scalability:** Consider message queues (e.g., RabbitMQ, Kafka) for decoupling firehose processing from aggregation/broadcasting if load increases significantly.
-*   **Firehose Reconnection:** Add robust automatic reconnection logic for the firehose subscription in `src/firehose.ts`.
-*   **Logging:** Implement structured logging (e.g., using Winston or Pino) with configurable levels.
-*   **Configuration (Partial ✅):** Moved `PORT` and `DATABASE_URL` to environment variables/secrets. Other constants (intervals, throttle factor) could still be moved.
-*   **Testing Coverage:** Expand unit and integration test coverage.
-*   **Rate Limiting:** Implement more graceful handling of potential Bluesky API rate limits (if using authenticated endpoints in the future).
-*   **Authentication:** Add optional authentication/authorization if exposing the dashboard publicly.
+13.13 **Enable MA Calculation on Partial Windows (✅ DONE):**
+    *   **Backend (`src/server.ts`):**
+        *   Modify live MA calculation (`updateIncrementalWindowState`) to compute and return an average as long as the partial window has data (`state.queue.length > 0 && state.summedPostCount > 0`), instead of waiting for the full window.
+        *   Modify historical MA calculation (`calculateSentimentMovingAverage`/`calculateNumericMovingAverage`) to compute and return an average at each point based on the available data within the sliding window up to that point, removing the check that waits for a full window.
+    *   **Goal:** Eliminate `null` gaps in MA lines on the frontend, providing continuous visualization (accepting initial values represent partial windows).
+
+14. **UI/UX Refactor: Dynamic Signal Plotting MVP (⚪ To Do):**
+    *   **Goal:** Improve usability by consolidating charts and allowing users to dynamically add specific signals (language + metric combination) to a main chart area.
+    *   **14.1: Frontend - Simplify Chart Layout (`public/index.html`):**
+        *   Reduce HTML to contain only two main canvas elements: `mainChart` (for line signals) and `volumeChart` (for stacked bars).
+        *   Add a UI element (e.g., button `+ Add Signal`) to trigger signal selection.
+        *   Add a hidden UI container (e.g., div `signalSelector`) with dropdowns (Language, Metric) and checkboxes (Raw, 5m MA, 1h MA) for defining a new signal to plot.
+    *   **14.2: Frontend - Signal Management State (`public/app.ts`):**
+        *   Introduce `plottedSignals` array state to store configurations of currently displayed signals.
+        *   Refactor `initializeCharts` to only initialize `mainChart` and `volumeChart`.
+    *   **14.3: Frontend - Signal Selection UI Logic (`public/app.ts`):**
+        *   Implement event listeners for `+ Add Signal` button (to show selector) and confirm/cancel buttons within the selector.
+        *   On confirm, add the new signal configuration to `plottedSignals` and trigger `requestHistoryData`.
+        *   (Optional): Display the list of `plottedSignals` with remove buttons.
+    *   **14.4: Frontend - Data Request Adaptation (`public/app.ts`):**
+        *   Modify `requestHistoryData` to determine the set of unique languages required based on `plottedSignals`.
+    *   **14.5: Frontend - Chart Data Refactor (`public/app.ts`):**
+        *   Refactor `handleHistoryData` and `handleLiveUpdate`:
+            *   Loop through `plottedSignals` instead of `selectedLanguages`.
+            *   For `mainChart`, create/update datasets based on each signal's config (lang, metric, raw/MA visibility). Apply appropriate styling (e.g., raw faint, MAs dashed/solid).
+            *   For `volumeChart`, create/update one dataset per unique language present in `plottedSignals`. Apply stacking and sorting (`sortVolumeDatasets`).
+    *   **14.6: Backend - No Changes Needed (for MVP):** Existing backend functionality supports fetching required data.
+
+15. **Future Enhancements:**
+    *   **Refactor `server.ts`:** Break down logic into smaller modules.
+    *   **Introduce Frontend Framework:** Adopt React, Vue, or Svelte.
+    *   **Configuration Management:** Centralize backend constants.
+    *   **Robust Error Handling:** Improve error handling and user feedback.
+    *   **Database Migrations:** Add a migration tool.
+    *   **Deterministic Pruning:** Implement scheduled DB pruning.
+    *   **UI/UX Improvements:** Add loading indicators, debounce controls.
+    *   **Testing:** Add comprehensive unit and integration tests.
+    *   **Advanced Signal Customization:** Allow keyword filtering, combining signals with formulas.

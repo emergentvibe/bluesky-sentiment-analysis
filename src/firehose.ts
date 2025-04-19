@@ -29,64 +29,116 @@ function isFirehoseFrame(obj: unknown): obj is FirehoseFrame {
 }
 
 // Callback type expected by the server
-export type PostCallback = (postRecord: AppBskyFeedPost.Record, commitData: CommitData) => void;
+export type PostCallback = (post: AppBskyFeedPost.Record, commit: CommitData) => void;
 
 class FirehoseSubscription {
     private subscription: Subscription<ComAtprotoSyncSubscribeRepos.Commit> | null = null;
     private service: string;
+    private reconnectDelay: number = 5000; // Initial reconnect delay 5s
+    private maxReconnectDelay: number = 60000; // Max reconnect delay 60s
+    private isStopped: boolean = false; // Flag to prevent reconnect on intentional stop
 
     constructor(service: string) {
         this.service = service;
     }
 
+    // Added stop method
+    stop() {
+        this.isStopped = true;
+        // No explicit close needed, the loop termination handles it
+        this.subscription = null;
+        console.log('Firehose subscription stopped intentionally.');
+    }
+
     // Modified to accept PostCallback again
     async subscribeToFirehose(onPost: PostCallback) {
-        console.log('Attempting to connect to Bluesky Firehose via Subscription...');
-        this.subscription = new Subscription<ComAtprotoSyncSubscribeRepos.Commit>({
-            service: this.service,
-            method: 'com.atproto.sync.subscribeRepos', // Use string literal
-            validate: (value: unknown): any => {
-                // Basic validation: Check for properties typical of a commit frame we care about
-                if (typeof value === 'object' && value !== null && 'ops' in value && 'blocks' in value) {
-                    return value; // Let it through if it looks like a commit
-                }
-                return undefined; // Filter out other frame types
-            }
-        });
-        console.log('Firehose subscription created. Starting iteration...');
+        this.isStopped = false; // Reset flag on new subscription attempt
+        let currentDelay = this.reconnectDelay;
 
-        try {
-            for await (const commit of this.subscription) {
-                if (!commit) continue; // Skip if validator returned undefined
-                
-                // Process the commit - the actual parsing happens here
-                 try {
-                    // Cast to any here if needed, or rely on subsequent checks
-                    const commitData = commit as any;
-                    const car = await readCar(commitData.blocks as Uint8Array);
-                    for (const op of commitData.ops) {
-                        // Ensure op.cid is defined and op.action is not delete
-                        if (op.action !== 'delete' && op.path?.startsWith('app.bsky.feed.post/') && op.cid) {
-                            const recordBytes = car.blocks.get(op.cid);
-                            if (recordBytes) {
-                                const record = cborToLexRecord(recordBytes);
-                                // Check if the record is a valid post record
-                                if (record && typeof record === 'object' && record.$type === 'app.bsky.feed.post') {
-                                    // Pass the original commit object (which should have full type info)
-                                    onPost(record as AppBskyFeedPost.Record, commit as CommitData);
+        // Loop to handle reconnection
+        while (!this.isStopped) {
+            console.log('Attempting to connect/reconnect to Bluesky Firehose via Subscription...');
+            this.subscription = new Subscription<ComAtprotoSyncSubscribeRepos.Commit>({
+                service: this.service,
+                method: 'com.atproto.sync.subscribeRepos',
+                validate: (value: unknown): any => {
+                    if (typeof value === 'object' && value !== null && 'ops' in value && 'blocks' in value) {
+                        return value;
+                    }
+                    // TEMP: Log other message types for inspection
+                    // else if (typeof value === 'object' && value !== null && '$type' in value) {
+                    //     console.log(`Other message type: ${(value as any).$type}`);
+                    // }
+                    return undefined;
+                }
+            });
+            console.log('Firehose subscription object created. Starting iteration...');
+
+            try {
+                for await (const commit of this.subscription) {
+                    if (this.isStopped) break; // Check if stopped before processing
+                    if (!commit) continue; // Skip if validator filtered
+
+                    // Process the commit asynchronously
+                    try {
+                        const car = await readCar(commit.blocks as Uint8Array);
+                        for (const op of commit.ops) {
+                            if (op.action !== 'delete' && op.path?.startsWith('app.bsky.feed.post/') && op.cid) {
+                                const recordBytes = car.blocks.get(op.cid);
+                                if (recordBytes) {
+                                    const record = cborToLexRecord(recordBytes);
+                                    if (record && typeof record === 'object' && record.$type === 'app.bsky.feed.post') {
+                                        // *** Schedule processing, don't await ***
+                                        setImmediate(() => {
+                                            try {
+                                                // Align with CommitData definition from server.ts (commit, ops, repo, time)
+                                                const callbackCommitData: CommitData = {
+                                                    commit: commit, // Pass the full commit object
+                                                    ops: commit.ops,   // Pass the operations array
+                                                    repo: commit.repo,
+                                                    time: commit.time,
+                                                };
+                                                onPost(record as AppBskyFeedPost.Record, callbackCommitData);
+                                            } catch (postProcessingError) {
+                                                console.error('Error during async post processing:', postProcessingError);
+                                            }
+                                        });
+                                    }
                                 }
                             }
                         }
+                         // Reset delay on successful message processing
+                         currentDelay = this.reconnectDelay;
+                    } catch (error) {
+                        // Log errors processing a specific commit but continue the loop
+                        console.error(`Error processing commit for repo ${commit?.repo}:`, error); // Use optional chaining as commit type is complex
                     }
-                } catch (error) {
-                    console.error(`Error processing commit for repo ${(commit as any).repo}:`, error);
                 }
+                // If the loop finishes without error (graceful close?), break the reconnect loop
+                 if (!this.isStopped) console.log('Firehose subscription ended gracefully by server.');
+                 break; // Exit while loop
+
+            } catch (err: any) {
+                console.error('Firehose subscription error:', err);
+                // No explicit close needed here either, library handles cleanup
+                this.subscription = null;
+
+                if (this.isStopped) {
+                    console.log("Subscription stopped, not reconnecting.");
+                    break; // Exit while loop
+                }
+
+                // Implement exponential backoff for reconnection
+                console.log(`Will attempt to reconnect in ${currentDelay / 1000} seconds...`);
+                await new Promise(resolve => setTimeout(resolve, currentDelay));
+                currentDelay = Math.min(currentDelay * 2, this.maxReconnectDelay); // Double delay up to max
+
+            } finally {
+                 // This block executes when the `for await` loop finishes OR an error is thrown
+                 console.log('Firehose subscription iteration attempt finished.');
             }
-        } catch (err) {
-            console.error('Firehose subscription error:', err);
-        } finally {
-            console.log('Firehose subscription iteration ended.');
-        }
+        } // End while(!this.isStopped)
+         console.log('Exited firehose subscription loop.');
     }
 }
 

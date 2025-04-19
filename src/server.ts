@@ -272,8 +272,22 @@ interface AggregatedScoreEntry {
 let currentIntervalScores: { [lang: string]: SentimentScores } = {};
 let currentIntervalPostCount: { [lang: string]: number } = {};
 
-// *** ADDED: In-memory buffer for recent history (for live MA calculation) ***
+// *** ADDED: In-memory buffer for recent history (for history requests) ***
 let recentHistoryBuffer: { [lang: string]: HistoryEntry[] } = {};
+
+// *** ADDED: State for incremental live MA calculation ***
+interface WindowState {
+    queue: HistoryEntry[]; // Holds entries currently in the window
+    summedScores: SentimentScores;
+    summedPostCount: number;
+    windowPoints: number; // Max size of the queue
+}
+let liveMAState: {
+    [lang: string]: {
+        short: WindowState;
+        long: WindowState;
+    }
+} = {};
 
 // Helper function to create an empty scores object (used for initializing language buckets)
 function createEmptyScores(): SentimentScores {
@@ -286,6 +300,44 @@ function addScores(target: SentimentScores, source: SentimentScores): void {
         if (target.hasOwnProperty(key)) {
             target[key as keyof SentimentScores] += source[key as keyof SentimentScores];
         }
+    }
+}
+
+// *** ADDED: Helper to subtract scores ***
+function subtractScores(target: SentimentScores, source: SentimentScores): void {
+    for (const key in source) {
+        if (target.hasOwnProperty(key)) {
+            target[key as keyof SentimentScores] -= source[key as keyof SentimentScores];
+        }
+    }
+}
+
+// *** ADDED: Helper function for incremental MA calculation ***
+function updateIncrementalWindowState(state: WindowState, newEntry: HistoryEntry): SentimentScores | null {
+    // Add new entry to sums and queue
+    addScores(state.summedScores, newEntry.scores);
+    state.summedPostCount += newEntry.postCount;
+    state.queue.push(newEntry);
+
+    // Remove old entry if window exceeds size
+    if (state.queue.length > state.windowPoints) {
+        const oldEntry = state.queue.shift(); // Remove from the front (oldest)
+        if (oldEntry) {
+            subtractScores(state.summedScores, oldEntry.scores);
+            state.summedPostCount -= oldEntry.postCount;
+        }
+    }
+
+    // Calculate and return MA if window is full and valid
+    if (state.queue.length > 0 && state.summedPostCount > 0) {
+        const avgScores = createEmptyScores();
+        for (const key in avgScores) {
+            avgScores[key as keyof SentimentScores] = state.summedScores[key as keyof SentimentScores] / state.summedPostCount;
+        }
+        return avgScores;
+    } else {
+        // Window not full or no posts in window
+        return null;
     }
 }
 
@@ -333,7 +385,8 @@ function processPost(postRecord: AppBskyFeedPost.Record, commitData: CommitData)
 }
 
 // --- Reusable Moving Average Helper ---
-// Revert to returning null when MA cannot be calculated
+// Revert to returning null when MA cannot be calculated -- ** No longer strictly true, will calc on partial **
+// ** This function is now less relevant for sentiment MAs, kept for potential other uses **
 function calculateNumericMovingAverage(data: (number | null)[], windowSize: number): (number | null)[] {
     if (windowSize <= 0) {
         // Return array of nulls if window size is invalid
@@ -367,27 +420,42 @@ function calculateNumericMovingAverage(data: (number | null)[], windowSize: numb
     return result;
 }
 
-// Revert to returning null SentimentScores when MA cannot be calculated
+// Revert to returning null SentimentScores when MA cannot be calculated -- ** Now calculates on partial windows **
 function calculateSentimentMovingAverage(data: HistoryEntry[], windowPoints: number): (SentimentScores | null)[] {
      const result: (SentimentScores | null)[] = Array(data.length).fill(null); // Initialize with nulls
      const categories = Object.keys(createEmptyScores()) as (keyof SentimentScores)[];
 
-     for (const category of categories) {
-         // *** MODIFIED: Calculate MA on NORMALIZED scores per interval ***
-         const categoryValues = data.map(entry =>
-             entry.postCount > 0 ? (entry.scores[category] ?? 0) / entry.postCount : 0
-         );
-         const categoryMA = calculateNumericMovingAverage(categoryValues, windowPoints);
-         for(let i = 0; i < data.length; i++) {
-             // Check if the numeric MA was calculable
-             if (categoryMA[i] !== null) {
-                 if (result[i] === null) {
-                     result[i] = createEmptyScores(); // Initialize the score object if needed
-                 }
-                 // Assign the calculated MA (which is now an average of normalized scores)
-                 result[i]![category] = categoryMA[i]!;
+     // Use running sums for post-weighted average
+     const runningSums: SentimentScores = createEmptyScores();
+     let runningCount = 0;
+     const windowQueue: HistoryEntry[] = []; // Keep track of entries in the current window
+
+     for (let i = 0; i < data.length; i++) {
+         const currentEntry = data[i];
+
+         // Add current entry to sums and queue
+         addScores(runningSums, currentEntry.scores);
+         runningCount += currentEntry.postCount;
+         windowQueue.push(currentEntry);
+
+         // Remove oldest entry if window is exceeded
+         if (windowQueue.length > windowPoints) {
+             const oldestEntry = windowQueue.shift(); // Remove from front
+             if (oldestEntry) {
+                 subtractScores(runningSums, oldestEntry.scores);
+                 runningCount -= oldestEntry.postCount;
              }
-             // If categoryMA[i] is null, result[i] for this category remains null (or initial 0)
+         }
+
+         // Calculate MA if there are posts in the current (potentially partial) window
+         if (runningCount > 0) {
+             const avgScores = createEmptyScores();
+             for (const category of categories) {
+                 avgScores[category] = runningSums[category] / runningCount;
+             }
+             result[i] = avgScores;
+         } else {
+             result[i] = null; // Still null if window has zero posts
          }
      }
      return result;
@@ -512,7 +580,7 @@ async function aggregateAndStore(): Promise<void> {
     currentIntervalPostCount = {};
 
     const liveUpdatePayload: LiveUpdateEntry[] = [];
-    const bufferCutoffTime = now - LIVE_UPDATE_BUFFER_MS;
+    const bufferCutoffTime = now - LIVE_UPDATE_BUFFER_MS; // For recentHistoryBuffer pruning
 
     // Process each language that had activity in the last interval
     for (const langCode in savedScoresByLang) {
@@ -529,67 +597,61 @@ async function aggregateAndStore(): Promise<void> {
                         ON CONFLICT (timestamp, language) DO NOTHING;`,
                        [timestamp, langCode, JSON.stringify(scores), postCount]
                     );
-                    // Optional: Log successful save less frequently
-                    // if (wss.clients.size > 0 || Math.random() < 0.05) {
-                    //     console.log(`[${timestamp.toISOString()}] Aggregated ${postCount} posts for lang [${langCode}]. Saved.`);
-                    // }
                 } catch (err: any) {
                     console.error(`Error saving data for lang [${langCode}]:`, err.message || err);
-                    // Continue processing other languages even if one save fails
                 }
 
-                // 2. Prepare data for buffer and live update
+                // 2. Prepare data entry for buffer and live update
                 const currentEntry: HistoryEntry = {
                     timestamp: now,
                     scores: scores,
                     postCount: postCount,
-                    // MAs will be calculated next using the buffer
+                    // MAs will be calculated incrementally next
                 };
 
-                // 3. Update & Prune In-Memory Buffer
-                if (!recentHistoryBuffer[langCode]) {
-                    recentHistoryBuffer[langCode] = [];
-                }
-                recentHistoryBuffer[langCode].push(currentEntry);
-                // Keep buffer sorted and remove old entries
-                recentHistoryBuffer[langCode] = recentHistoryBuffer[langCode]
-                    .filter(entry => entry.timestamp >= bufferCutoffTime)
-                    .sort((a, b) => a.timestamp - b.timestamp); // Ensure sorted for MA calc
-
-                // 4. Calculate Latest MAs using the Buffer
-                const bufferData = recentHistoryBuffer[langCode];
-                let latestShortAvg: SentimentScores | null = null; // Initialize to null
-                let latestLongAvg: SentimentScores | null = null;  // Initialize to null
-
-                if (bufferData.length > 0) {
+                // 3. Initialize Live MA State for this language if it's new
+                if (!liveMAState[langCode]) {
                     const approxInterval = AGGREGATION_INTERVAL_MS;
-                    const shortPoints = Math.max(1, Math.round(SHORT_AVG_WINDOW_MS / approxInterval));
-                    const longPoints = Math.max(1, Math.round(LONG_AVG_WINDOW_MS / approxInterval));
-
-                    // Check if buffer has enough data BEFORE calculating
-                    if (bufferData.length >= shortPoints) {
-                        const shortMABuffer = calculateSentimentMovingAverage(bufferData, shortPoints);
-                        // *** ADDED: Log calculated MA buffer ***
-                        console.log(`  -> Lang [${langCode}] shortMABuffer length: ${shortMABuffer?.length}. Last element:`, shortMABuffer ? JSON.stringify(shortMABuffer[shortMABuffer.length - 1]) : 'N/A');
-                        if (shortMABuffer.length > 0) {
-                            latestShortAvg = shortMABuffer[shortMABuffer.length - 1]; // Get last element
+                    liveMAState[langCode] = {
+                        short: {
+                            queue: [],
+                            summedScores: createEmptyScores(),
+                            summedPostCount: 0,
+                            windowPoints: Math.max(1, Math.round(SHORT_AVG_WINDOW_MS / approxInterval))
+                        },
+                        long: {
+                            queue: [],
+                            summedScores: createEmptyScores(),
+                            summedPostCount: 0,
+                            windowPoints: Math.max(1, Math.round(LONG_AVG_WINDOW_MS / approxInterval))
                         }
-                    }
-                    if (bufferData.length >= longPoints) {
-                        const longMABuffer = calculateSentimentMovingAverage(bufferData, longPoints);
-                        // *** ADDED: Log calculated MA buffer ***
-                        console.log(`  -> Lang [${langCode}] longMABuffer length: ${longMABuffer?.length}. Last element:`, longMABuffer ? JSON.stringify(longMABuffer[longMABuffer.length - 1]) : 'N/A');
-                        if (longMABuffer.length > 0) {
-                            latestLongAvg = longMABuffer[longMABuffer.length - 1]; // Get last element
-                        }
-                    }
+                    };
+                    console.log(`Initialized live MA state for [${langCode}]: Short=${liveMAState[langCode].short.windowPoints}pts, Long=${liveMAState[langCode].long.windowPoints}pts`);
                 }
+
+                // 4. Calculate Latest MAs Incrementally
+                const latestShortAvg = updateIncrementalWindowState(liveMAState[langCode].short, currentEntry);
+                const latestLongAvg = updateIncrementalWindowState(liveMAState[langCode].long, currentEntry);
+
+                // *** Logging the results of incremental calculation ***
+                // console.log(` -> Lang [${langCode}] Incremental MA: Short=`, JSON.stringify(latestShortAvg));
+                // console.log(` -> Lang [${langCode}] Incremental MA: Long=`, JSON.stringify(latestLongAvg));
 
                 // Add calculated MAs (which might be null) to the entry
                 currentEntry.shortAvg = latestShortAvg;
                 currentEntry.longAvg = latestLongAvg;
 
-                // 5. Add entry (with potentially null MAs) to live broadcast payload
+                // 5. Update & Prune In-Memory Buffer (recentHistoryBuffer - still needed for history requests)
+                if (!recentHistoryBuffer[langCode]) {
+                    recentHistoryBuffer[langCode] = [];
+                }
+                recentHistoryBuffer[langCode].push(currentEntry); // Add entry with calculated MAs
+                // Keep buffer sorted and remove old entries (based on LIVE_UPDATE_BUFFER_MS)
+                recentHistoryBuffer[langCode] = recentHistoryBuffer[langCode]
+                    .filter(entry => entry.timestamp >= bufferCutoffTime)
+                    .sort((a, b) => a.timestamp - b.timestamp); // Ensure sorted
+
+                // 6. Add entry (with incrementally calculated MAs) to live broadcast payload
                 liveUpdatePayload.push({
                     language: langCode,
                     timestamp: currentEntry.timestamp,
@@ -599,19 +661,6 @@ async function aggregateAndStore(): Promise<void> {
                     longAvg: currentEntry.longAvg
                 });
             }
-        }
-    }
-
-    // --- Pruning Logic --- (No changes needed)
-    if (Math.random() < 0.05) { 
-        const cutoffTime = new Date(now - PRUNE_AGE_MS);
-        console.log(`Pruning data older than ${cutoffTime.toISOString()}...`);
-        const deleteResult = await pool.query(
-            'DELETE FROM sentiment_data WHERE timestamp < $1',
-            [cutoffTime]
-        );
-        if (deleteResult.rowCount !== null && deleteResult.rowCount > 0) {
-             console.log(`Pruned ${deleteResult.rowCount} old entries from database.`);
         }
     }
 
