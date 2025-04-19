@@ -2,6 +2,7 @@ import { ComAtprotoSyncSubscribeRepos } from '@atproto/api';
 import { Subscription } from '@atproto/xrpc-server';
 import { cborToLexRecord, readCar } from '@atproto/repo';
 import { AppBskyFeedPost } from '@atproto/api';
+import { CommitData } from './server.js'; // Add .js extension
 
 // Define the expected structure based on logs
 interface FirehoseFrame {
@@ -27,70 +28,71 @@ function isFirehoseFrame(obj: unknown): obj is FirehoseFrame {
     );
 }
 
-// Define the type for the callback function that will process posts
-export type PostCallback = (postRecord: AppBskyFeedPost.Record, commitData: { repo: string, time: string, commit: any, ops: any[] }) => void;
+// Callback type expected by the server
+export type PostCallback = (postRecord: AppBskyFeedPost.Record, commitData: CommitData) => void;
 
-const BSKY_SERVICE = 'wss://bsky.network';
-const METHOD = 'com.atproto.sync.subscribeRepos';
+class FirehoseSubscription {
+    private subscription: Subscription<ComAtprotoSyncSubscribeRepos.Commit> | null = null;
+    private service: string;
 
-// Basic validator required by Subscription
-const validate = (value: unknown): unknown => {
-    if (!isFirehoseFrame(value)) {
-        console.warn('Received unexpected frame structure:', value);
-        // Optionally throw an error to stop the subscription on invalid data
-        // throw new Error("Invalid frame structure received");
+    constructor(service: string) {
+        this.service = service;
     }
-    return value;
-};
 
-// Function to start the firehose subscription and handle events
-export async function subscribeToFirehose(callback: PostCallback) {
-    console.log('Attempting to connect to Bluesky Firehose via Subscription...');
-
-    const firehose = new Subscription({
-        service: BSKY_SERVICE,
-        method: METHOD,
-        validate: validate,
-        getParams: () => ({ cursor: undefined })
-    });
-
-    console.log('Firehose subscription created. Starting iteration...');
-
-    try {
-        for await (const frame of firehose) {
-            if (!isFirehoseFrame(frame)) {
-                console.warn('Skipping frame due to unexpected structure:', frame);
-                continue;
+    // Modified to accept PostCallback again
+    async subscribeToFirehose(onPost: PostCallback) {
+        console.log('Attempting to connect to Bluesky Firehose via Subscription...');
+        this.subscription = new Subscription<ComAtprotoSyncSubscribeRepos.Commit>({
+            service: this.service,
+            method: 'com.atproto.sync.subscribeRepos', // Use string literal
+            validate: (value: unknown): any => {
+                // Basic validation: Check for properties typical of a commit frame we care about
+                if (typeof value === 'object' && value !== null && 'ops' in value && 'blocks' in value) {
+                    return value; // Let it through if it looks like a commit
+                }
+                return undefined; // Filter out other frame types
             }
+        });
+        console.log('Firehose subscription created. Starting iteration...');
 
-            // Check if it's a commit message using $type
-            if (frame['$type'] === 'com.atproto.sync.subscribeRepos#commit' && frame.blocks && frame.commit && frame.ops) {
-                try {
-                    const car = await readCar(frame.blocks as Uint8Array);
-                    for (const op of frame.ops) {
+        try {
+            for await (const commit of this.subscription) {
+                if (!commit) continue; // Skip if validator returned undefined
+                
+                // Process the commit - the actual parsing happens here
+                 try {
+                    // Cast to any here if needed, or rely on subsequent checks
+                    const commitData = commit as any;
+                    const car = await readCar(commitData.blocks as Uint8Array);
+                    for (const op of commitData.ops) {
+                        // Ensure op.cid is defined and op.action is not delete
                         if (op.action !== 'delete' && op.path?.startsWith('app.bsky.feed.post/') && op.cid) {
                             const recordBytes = car.blocks.get(op.cid);
                             if (recordBytes) {
                                 const record = cborToLexRecord(recordBytes);
+                                // Check if the record is a valid post record
                                 if (record && typeof record === 'object' && record.$type === 'app.bsky.feed.post') {
-                                    callback(record as AppBskyFeedPost.Record, { repo: frame.repo, time: frame.time, commit: frame.commit, ops: frame.ops });
+                                    // Pass the original commit object (which should have full type info)
+                                    onPost(record as AppBskyFeedPost.Record, commit as CommitData);
                                 }
                             }
                         }
                     }
                 } catch (error) {
-                    console.error(`Error processing commit for repo ${frame.repo}:`, error);
+                    console.error(`Error processing commit for repo ${(commit as any).repo}:`, error);
                 }
-            } else {
-                 // console.log(`Received frame type: ${frame.$type} for repo ${frame.repo}`);
             }
+        } catch (err) {
+            console.error('Firehose subscription error:', err);
+        } finally {
+            console.log('Firehose subscription iteration ended.');
         }
-    } catch (error) {
-        console.error('Firehose subscription error:', error);
-    } finally {
-        console.log('Firehose subscription iteration ended.');
     }
 }
+
+export default FirehoseSubscription;
+
+// Remove old standalone subscribeToFirehose function if it still exists
 
 // Example Usage
 // async function run() {

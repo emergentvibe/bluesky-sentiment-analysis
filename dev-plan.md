@@ -206,6 +206,60 @@ This document outlines the plan to build a real-time dashboard that monitors Blu
     *   Deployed the application (`fly deploy`).
     *   Monitored logs (`fly logs`) for debugging.
 
+13. **Multi-Language Comparison (Server-Side Processing) (In Progress):**
+    *   **Goal:** Allow users to select multiple languages and view their sentiment trends overlaid on the same charts, with aggregation and moving averages calculated efficiently on the backend.
+    *   **Rationale:** Offloading aggregation and MA calculations to the server significantly reduces frontend load, improves performance (especially on long time scales), simplifies frontend logic, and aligns with common practices for time-series dashboards.
+    *   **13.1: Backend - Lexicon Loading & Parsing (✅ Completed):**
+        *   Modified `src/sentiment.ts` to parse the single consolidated `NRC-Emotion-Lexicon-ForVariousLanguages.txt`.
+        *   Loads all languages identified in the header into `Map<string, NrcLexicon>`.
+        *   Requires maintaining `francToNrcMap` mapping.
+    *   **13.1.1: Backend - Language Filtering (✅ Completed):**
+        *   Filtered `francToNrcMap` in `src/sentiment.ts` to ~20 target languages (prioritizing those with stemmers + high-usage internet languages).
+        *   Analysis will now only proceed for posts detected in one of these target languages.
+        *   Updated `stemmersByLanguage` map to only include stemmers for the filtered target languages.
+    *   **13.2: Backend - Language-Specific Analysis & Stemming (✅ Completed):**
+        *   Modify `src/sentiment.ts`: Update `analyzeSentiment` signature to accept `language` code; use the map to select the correct lexicon.
+        *   Import `PorterStemmer` and other available language stemmers (Fr, Es, It, Nl, Pt, Sv, No, Ru) from `natural`.
+        *   Create map associating language names with stemmer classes.
+        *   In `analyzeSentiment`, look up stemmer by language name and apply `.stem(token)` before lexicon lookup if stemmer exists.
+        *   Stemming is applied only for languages where `natural` provides a stemmer.
+    *   **13.3: Backend - Database Schema Update (✅ Completed):**
+        *   Modify `src/server.ts` (`initializeDatabase`): Add `language VARCHAR(10)` column, change PK to `(timestamp, language)`, update index.
+    *   **13.4: Backend - Process All Languages (✅ Completed):**
+        *   Modify `src/server.ts` (`processPost`): Remove English filter.
+        *   Modify `src/server.ts`: Update aggregation accumulators (`currentIntervalScores`, `currentIntervalPostCount`) to be language-keyed maps.
+    *   **13.5: Backend - Store Language Data (✅ Completed):**
+        *   Modify `src/server.ts` (`aggregateAndStore`): Loop through accumulated languages, `INSERT` rows tagged with `language`.
+    *   **13.6: Backend - Server-Side Aggregation Function (✅ Completed):**
+        *   Implement `getAggregatedData(languages, startTime, endTime, intervalMs)` in `src/server.ts`: Queries raw DB data, aggregates into buckets based on `intervalMs`.
+    *   **13.7: Backend - Server-Side Moving Average Function (✅ Completed):**
+        *   Implement `calculateMAsForAggregatedData(aggregatedData, intervalMs, shortWindowMs, longWindowMs)` in `src/server.ts`: Calculates MAs on *already aggregated* data.
+        *   Extracted reusable `calculateNumericMovingAverage` and `calculateSentimentMovingAverage` helpers.
+    *   **13.8: Backend - WebSocket Protocol & Handlers (✅ Completed):**
+        *   Define `requestHistory`, `historyData`, `liveUpdate` message structures.
+        *   Implement `requestHistory` handler in `wss.onmessage` (calling aggregation/MA functions and sending `historyData`).
+        *   Modify `aggregateAndStore` to broadcast `liveUpdate` message (containing latest 10s aggregates, *not* MAs for simplicity).
+    *   **13.9: Frontend - Language Selection UI (✅ Completed):**
+        *   Add HTML controls (div#language-checkboxes).
+        *   Define `AVAILABLE_LANGUAGES` constant in `public/app.ts`.
+        *   Dynamically populate checkboxes in `setupControls`.
+        *   Add `selectedLanguages` state and event listeners to update it.
+    *   **13.10: Frontend - Data Request Logic (✅ Completed):**
+        *   Implement `requestHistoryData()` in `public/app.ts` to send `requestHistory` message with selected languages, time window, and calculated interval.
+        *   Call `requestHistoryData()` on initial WebSocket connection and when languages or time window change.
+    *   **13.11: Frontend - Chart Data Handling & Dynamic Datasets (✅ Completed):**
+        *   Modify `public/app.ts` (`socket.onmessage`): Handle `historyData`, `liveUpdate`.
+        *   Implement `handleHistoryData`:
+            *   Clears existing chart datasets.
+            *   Stores received data keyed by language.
+            *   Iterates selected languages, creating MA datasets (short/long) with unique colors.
+            *   Populates datasets with server-calculated MA data.
+            *   Updates chart labels.
+        *   Implement `handleLiveUpdate` (Initial Version - Option A):
+            *   Logs received updates but does *not* modify chart data/datasets (MAs not included in live update).
+            *   Chart updates rely on `historyData` received via `requestHistoryData`.
+        *   Remove client-side `calculateMovingAverage` function.
+
 **Future Enhancements (Refined):**
 
 *   **Data Persistence (✅ Completed):** Implemented using Fly Postgres.

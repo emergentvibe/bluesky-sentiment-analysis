@@ -10,52 +10,107 @@
             margin: 0;
             padding: 20px;
             background-color: #f0f2f5;
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
         }
         h1 {
             text-align: center;
             color: #333;
+            margin-top: 0;
         }
-        .controls {
-            text-align: center;
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start; /* Align items to the top */
+            padding-bottom: 15px;
+            border-bottom: 1px solid #ddd;
             margin-bottom: 20px;
         }
-        .controls button {
-            padding: 5px 15px;
-            margin: 0 5px;
-            cursor: pointer;
+
+        .controls-container {
+            display: flex;
+            gap: 20px; /* Space between control groups */
+            align-items: flex-start; /* Align tops of control groups */
+            flex-wrap: wrap; /* Allow wrapping on smaller screens */
+            justify-content: center; /* Center controls horizontally */
+        }
+
+        .control-group {
+             display: flex;
+             flex-direction: column; /* Stack label and control */
+             align-items: center; /* Center items within the group */
+        }
+
+        .control-group label {
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #555;
+        }
+
+        .control-group select,
+        .language-selector-container {
+            padding: 8px;
             border: 1px solid #ccc;
             border-radius: 4px;
+            min-width: 150px; /* Give controls some base width */
+        }
+
+        .language-selector-container {
+            max-height: 150px; /* Limit height */
+            overflow-y: auto; /* Add scrollbar */
             background-color: #fff;
+             padding: 10px;
         }
-        .controls button.active {
-            background-color: #d0d0d0;
-            font-weight: bold;
+
+         .language-option {
+            display: block; /* Each on its own line */
+            margin-bottom: 5px;
+            white-space: nowrap;
         }
+
+         .language-option label {
+             margin-left: 5px; /* Space between checkbox and text */
+             font-weight: normal; /* Override bold from control-group */
+             color: #333;
+         }
+
         .chart-grid {
             display: grid;
+            /* Create 2 primary columns, but allow smaller charts to fit */
             grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
             gap: 20px;
+            flex-grow: 1; /* Allow grid to take remaining space */
             margin-top: 20px;
         }
-        /* Style for the full-width chart */
+
+        /* Make Sentiment and Volume charts span full width */
         .chart-container.full-width {
-            grid-column: 1 / -1; /* Span all columns */
+            grid-column: 1 / -1; /* Span all available columns */
+             height: 40vh; /* Adjust height for primary charts */
+             min-height: 300px;
         }
+
         .chart-container {
             background-color: #fff;
             padding: 15px;
             border-radius: 8px;
             box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            display: flex;
+            flex-direction: column;
+            min-height: 300px; /* Default height for smaller charts */
+            height: 35vh; /* Default height */
         }
         canvas {
+            flex-grow: 1; /* Allow canvas to fill container */
             max-width: 100%;
-            height: auto;
+            height: auto; /* Maintain aspect ratio if width constrained */
         }
-        h2 {
+        .chart-container h2 {
             text-align: center;
             margin-top: 0;
             margin-bottom: 15px;
-            font-size: 1.1em;
+            font-size: 1.2em;
             color: #555;
         }
 
@@ -111,35 +166,53 @@
     </style>
 </head>
 <body>
-    <!-- Info Icon/Trigger moved to top right -->
-    <span class="info-icon">
-        ? What do these numbers mean?
-        <span class="tooltip-text">Scores represent the average net sentiment per post within each 10-second interval, calculated as:<br>(Positive Score / Posts) - (Negative Score / Posts)</span>
-    </span>
+    <header>
+        <h1>Bluesky Real-time Sentiment Trends</h1>
+        <!-- Info Icon/Trigger moved to top right of header -->
+        <span class="info-icon">
+            ? What do these numbers mean?
+            <span class="tooltip-text">Sentiment score is the average net sentiment (Positive - Negative) per post.<br>Volume is the number of posts per interval.<br>MAs are Moving Averages (hidden by default, click legend).</span>
+        </span>
+    </header>
 
-    <h1>
-        Bluesky Real-time Sentiment Trends
-    </h1>
-    <div class="controls">
-        <span style="margin-right: 10px;">Time Range:</span>
-        <!-- Restore old buttons -->
-        <button id="btn-15m" data-duration="0.25">15m</button>
-        <button id="btn-1h" data-duration="1">1h</button>
-        <button id="btn-2h" data-duration="2">2h</button>
-        <button id="btn-6h" data-duration="6">6h</button>
-        <button id="btn-12h" data-duration="12">12h</button>
-        <!-- Existing new buttons -->
-        <button id="btn-1d" data-duration="24" class="active">1d</button> <!-- Default: 1 day -->
-        <button id="btn-1w" data-duration="168">1w</button>
-        <button id="btn-1mo" data-duration="720">1mo</button>
+    <!-- Consolidated Controls -->
+    <div class="controls-container">
+        <div class="control-group">
+            <label for="timeWindowSelect">Time Range:</label>
+            <select id="timeWindowSelect">
+                <option value="0.25">15 Minutes</option>
+                <option value="1">1 Hour</option>
+                <option value="2">2 Hours</option>
+                <option value="6">6 Hours</option>
+                <option value="12">12 Hours</option>
+                <option value="24" selected>1 Day</option> <!-- Default selected -->
+                <option value="168">1 Week</option>
+                <option value="720">1 Month</option>
+            </select>
+        </div>
+        <div class="control-group">
+            <label for="languageSelector">Languages:</label>
+            <div id="languageSelector" class="language-selector-container">
+                <!-- Checkboxes will be populated dynamically by app.ts -->
+            </div>
+        </div>
     </div>
+
+    <!-- Chart Grid -->
     <div class="chart-grid">
-        <!-- Add the new wider chart container at the top -->
+        <!-- Sentiment Chart (Full Width) -->
         <div class="chart-container full-width">
-            <h2>Overall Sentiment (Positive vs. Negative)</h2>
-            <canvas id="chart-posneg"></canvas>
+            <h2>Sentiment Score (Net)</h2>
+            <canvas id="sentimentChart"></canvas> <!-- CORRECT ID -->
         </div>
 
+        <!-- Volume Chart (Full Width) -->
+        <div class="chart-container full-width">
+            <h2>Post Volume</h2>
+            <canvas id="volumeChart"></canvas> <!-- CORRECT ID -->
+        </div>
+
+        <!-- Individual Emotion Charts (Grid Layout) -->
         <div class="chart-container">
             <h2>Anger</h2>
             <canvas id="chart-anger"></canvas>
@@ -174,12 +247,7 @@
         </div>
     </div>
 
-    <!-- REMOVE Chart.js library CDN includes -->
-    <!-- <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script> -->
-    <!-- <script src="https://cdn.jsdelivr.net/npm/moment@2.29.4/moment.min.js"></script> -->
-    <!-- <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-moment@1.0.1/dist/chartjs-adapter-moment.min.js"></script> -->
-
-    <!-- Include our bundled frontend script (still needs type="module") -->
+    <!-- Include our bundled frontend script -->
     <script type="module" src="./dist/app.js"></script>
 </body>
 </html> 
