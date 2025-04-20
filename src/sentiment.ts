@@ -174,25 +174,23 @@ export async function analyzeSentiment(text: string, langCode: string): Promise<
             const wordId = wordResult.rows[0]?.word_id;
 
             if (wordId) {
-                // 2. If word found, find associated emotion names
-                const emotionResult = await client.query(
-                   `SELECT le.emotion_name
-                    FROM word_emotion_associations wea
-                    JOIN lexicon_emotions le ON wea.emotion_id = le.emotion_id
-                    WHERE wea.word_id = $1`,
+                const associations = await client.query(
+                   `SELECT e.emotion_name
+                    FROM word_emotion_associations wa
+                    JOIN lexicon_emotions e ON wa.emotion_id = e.emotion_id
+                    WHERE wa.word_id = $1`,
                    [wordId]
                 );
 
-                // 3. Increment scores for found emotions
-                for (const row of emotionResult.rows) {
-                    const emotionName = row.emotion_name;
-                    // Check against the keys defined in the SentimentScores interface
+                associations.rows.forEach(assoc => {
+                    const emotionName = assoc.emotion_name.toLowerCase();
                     if (scores.hasOwnProperty(emotionName)) {
                         scores[emotionName]++;
                     } else {
-                         console.warn(`DB returned emotion '${emotionName}' not defined in SentimentScores interface.`);
+                        // This should ideally not happen if scores are initialized correctly based on currentEmotionKeys
+                        // console.warn(`DB returned emotion '${emotionName}' not defined in SentimentScores interface.`);
                     }
-                }
+                });
             }
         }
         // Return the populated scores object

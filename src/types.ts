@@ -1,22 +1,8 @@
 /**
  * Defines the structure for sentiment scores (count per category).
- * Should align with the output of the sentiment analysis function.
+ * Uses a dynamic record type to handle any number of emotions.
  */
-export interface SentimentScores {
-    anger: number;
-    anticipation: number;
-    disgust: number;
-    fear: number;
-    joy: number;
-    sadness: number;
-    surprise: number;
-    trust: number;
-    positive: number;
-    negative: number;
-    // Re-add the general index signature to satisfy loop indexing checks
-    [key: string]: number;
-    // Add other relevant keys if necessary
-}
+export type SentimentScores = Record<string, number>;
 
 /**
  * Base structure for aggregated data stored or processed.
@@ -34,8 +20,8 @@ export interface AggregatedScoreEntry {
  */
 export interface HistoryEntry extends Omit<AggregatedScoreEntry, 'timestamp' | 'language'> {
     timestamp: number; // Use number for consistency in history/live updates
-    shortAvg?: SentimentScores | null;
-    longAvg?: SentimentScores | null;
+    shortAvg?: SentimentScores | null; // Now uses dynamic SentimentScores type
+    longAvg?: SentimentScores | null; // Now uses dynamic SentimentScores type
 }
 
 /**
@@ -55,7 +41,7 @@ export interface LiveUpdateEntry {
     signalName: string; // Which metric or filter this update is for
     language: string;
     timestamp: number; // Use number timestamp
-    scores: SentimentScores; // The raw scores for the interval
+    scores: SentimentScores; // Now uses dynamic SentimentScores type
     postCount: number;
     shortAvg?: SentimentScores | null; // Optional MAs (might not apply to filters)
     longAvg?: SentimentScores | null;
@@ -78,7 +64,7 @@ export interface MetricSignal {
 /** State required for calculating a moving average incrementally. */
 export interface WindowState {
     queue: HistoryEntry[];
-    summedScores: SentimentScores;
+    summedScores: SentimentScores; // Now uses dynamic SentimentScores type
     summedPostCount: number;
     windowPoints: number;
 }

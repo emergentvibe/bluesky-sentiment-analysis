@@ -579,21 +579,26 @@ function initializeCharts() {
  * Calls `chart.update('none')` to redraw the charts without animation.
  */
 function updateCharts() {
+    console.log("[DEBUG] updateCharts() called.");
     const now = Date.now();
     const minTime = now - currentTimeWindowMs;
 
-    // Update all charts efficiently
     Object.values(chartInstances).forEach(chart => {
         if (chart) {
-            // *** ADDED: Set x-axis min/max based on currentTimeWindowMs ***
             if (chart.options?.scales?.x) {
                  chart.options.scales.x.min = minTime;
                  chart.options.scales.x.max = now;
             }
-            chart.update('none'); // Use 'none' to prevent animation
+            chart.update('none');
+            // Log completion for a specific chart to ensure it finishes
+            if (chart === chartInstances.sentimentChart) {
+                 console.log("[DEBUG] sentimentChart.update() finished.");
+            }
+             if (chart === chartInstances.volumeChart) {
+                 console.log("[DEBUG] volumeChart.update() finished.");
+            }
         }
     });
-    // console.log("Charts updated."); // Optional debug log
 }
 
 /**
@@ -668,20 +673,39 @@ function handleHistoryData(payload: { signalLangData: { [key: string]: HistoryEn
             
             console.log(` -> Processed ${historyPoints.length} history points for ${signalKey}. Found ${validPointsCount} points with non-null scores/MAs.`);
 
-            // Add/update datasets 
-            updateDataset(chartInstances.sentimentChart, `${config.metric} (${config.languageCode}) - Raw`, mainData, config.color);
-            updateDataset(chartInstances.sentimentChart, `${config.metric} (${config.languageCode}) - Short MA`, shortAvgData, config.color, true, true); 
-            updateDataset(chartInstances.sentimentChart, `${config.metric} (${config.languageCode}) - Long MA`, longAvgData, config.color, true, true);
+            // Add/update datasets ONLY IF they are configured to be shown
+            if (config.showRaw) {
+                updateDataset(chartInstances.sentimentChart, `${config.metric} (${config.languageCode}) - Raw`, mainData, config.color);
+            } else {
+                // Ensure dataset is removed if visibility was turned off
+                removeDataset(chartInstances.sentimentChart, `${config.metric} (${config.languageCode}) - Raw`);
+            }
+            if (config.showShortMA) {
+                updateDataset(chartInstances.sentimentChart, `${config.metric} (${config.languageCode}) - Short MA`, shortAvgData, config.color, true, true);
+            } else {
+                removeDataset(chartInstances.sentimentChart, `${config.metric} (${config.languageCode}) - Short MA`);
+            }
+            if (config.showLongMA) {
+                updateDataset(chartInstances.sentimentChart, `${config.metric} (${config.languageCode}) - Long MA`, longAvgData, config.color, true, true);
+            } else {
+                removeDataset(chartInstances.sentimentChart, `${config.metric} (${config.languageCode}) - Long MA`);
+            }
+            
+            // Always update volume dataset (visibility isn't controlled separately for volume)
             updateDataset(chartInstances.volumeChart, `Volume (${config.languageCode})`, volumeData, config.color + '80');
 
         } else {
             console.log(` -> No history data found for plotted signal: ${signalKey}`);
+            // Remove all related datasets if no history is found
             removeDataset(chartInstances.sentimentChart, `${config.metric} (${config.languageCode}) - Raw`);
             removeDataset(chartInstances.sentimentChart, `${config.metric} (${config.languageCode}) - Short MA`);
             removeDataset(chartInstances.sentimentChart, `${config.metric} (${config.languageCode}) - Long MA`);
             removeDataset(chartInstances.volumeChart, `Volume (${config.languageCode})`);
         }
     });
+
+    // Sort volume datasets after adding/removing history data
+    sortVolumeDatasets(chartInstances.volumeChart);
 
     updateCharts();
 }
@@ -703,104 +727,137 @@ function clearAllChartData(): void {
  * Aggregates post counts per language and updates the volume chart.
  */
 function handleLiveUpdate(payload: { updates: LiveUpdateEntry[] }): void {
-    // >>> 1. Log entry and payload <<<
-    console.log(`Received liveUpdate with ${payload?.updates?.length || 0} entries.`);
-    // console.log("LiveUpdate Payload:", payload);
+    console.log(`[DEBUG] Received liveUpdate with ${payload?.updates?.length || 0} entries.`);
+    // console.log("[DEBUG] LiveUpdate Payload:", JSON.stringify(payload, null, 2));
 
     if (!payload || !Array.isArray(payload.updates) || payload.updates.length === 0) {
-        return; // No updates to process
+        return;
     }
 
-    let chartNeedsUpdate = false; // Flag to update chart only if data was added
+    let chartNeedsUpdate = false;
+    const chart = chartInstances.sentimentChart;
+    const volumeChart = chartInstances.volumeChart;
+    if (!chart || !volumeChart) {
+        console.warn("[DEBUG] Cannot handle live update: Charts not ready.");
+        return;
+    }
+
+    const bufferTime = Date.now() - (currentTimeWindowMs + (5 * MINUTE_MS));
+    console.log(`[DEBUG] Buffer time calculated: ${new Date(bufferTime).toISOString()}`);
 
     payload.updates.forEach(update => {
-        const signalKey = `${update.signalName}_${update.language}`; // e.g., Anger_eng
+        const signalName = update.signalName;
+        const langCode = update.language;
+        const timestamp = update.timestamp;
 
-        // >>> 2. Log signal key being processed <<<
-        // console.log(` -> Processing update for: ${signalKey}`);
+        // >>> !! CRITICAL DEBUG START !! <<<
+        console.log(`%c[DEBUG] Update Check: signalName='${signalName}', langCode='${langCode}'`, 'color: orange; font-weight: bold;');
+        try {
+            console.log(`%c[DEBUG] Plotted Signals State: ${JSON.stringify(plottedSignals)}`, 'color: cyan;');
+        } catch (e) {
+             console.error("Error stringifying plottedSignals:", e);
+        }
+        // >>> !! CRITICAL DEBUG END !! <<<
 
-        // Check if this specific signal+language is currently plotted
         const correspondingPlottedSignal = plottedSignals.find(p => 
-            p.metric === update.signalName && p.languageCode === update.language
+            p.metric === signalName && p.languageCode === langCode
         );
 
-        // Only process update if the signal is actively plotted
+        // >>> Log find result <<<
+        console.log(`[DEBUG] Find Result for '${signalName}/${langCode}': ${!!correspondingPlottedSignal}`);
+        // >>> End Log <<<
+
         if (correspondingPlottedSignal) {
-            const chart = chartInstances.sentimentChart;
-            const volumeChart = chartInstances.volumeChart;
-            if (!chart || !volumeChart) return; // Charts not ready
+            console.log(`[DEBUG] ENTERED 'if (correspondingPlottedSignal)' block for ${signalName}/${langCode}`); // Log entry into block
+            console.log(`[DEBUG] Processing update for plotted signal: ${signalName} (${langCode}) at ${new Date(timestamp).toISOString()}`);
+            console.log(`[DEBUG]   Visibility Flags: Raw=${correspondingPlottedSignal.showRaw}, Short=${correspondingPlottedSignal.showShortMA}, Long=${correspondingPlottedSignal.showLongMA}`);
 
-            // Find datasets by label (ensure labels match handleHistoryData)
-            const rawLabel = `${update.signalName} (${update.language}) - Raw`;
-            const shortMALabel = `${update.signalName} (${update.language}) - Short MA`;
-            const longMALabel = `${update.signalName} (${update.language}) - Long MA`;
-            const volumeLabel = `Volume (${update.language})`;
+            // >>> Log current dataset labels BEFORE finding <<< 
+            const currentSentimentLabels = chart.data.datasets.map(ds => ds.label);
+            const currentVolumeLabels = volumeChart.data.datasets.map(ds => ds.label);
+            console.log(`[DEBUG]   Current Sentiment Labels: [${currentSentimentLabels.join(", ")}]`);
+            console.log(`[DEBUG]   Current Volume Labels: [${currentVolumeLabels.join(", ")}]`);
+            // >>> End Log <<< 
 
-            const rawDataset = chart.data.datasets.find(ds => ds.label === rawLabel);
-            const shortMADataset = chart.data.datasets.find(ds => ds.label === shortMALabel);
-            const longMADataset = chart.data.datasets.find(ds => ds.label === longMALabel);
-            const volumeDataset = volumeChart.data.datasets.find(ds => ds.label === volumeLabel);
+            const rawLabel = `${signalName} (${langCode}) - Raw`;
+            const shortMALabel = `${signalName} (${langCode}) - Short MA`;
+            const longMALabel = `${signalName} (${langCode}) - Long MA`;
+            const volumeLabel = `Volume (${langCode})`;
 
-            // >>> 3. Log dataset finding results <<<
-            // console.log(`   -> Datasets found: Raw=${!!rawDataset}, Short=${!!shortMADataset}, Long=${!!longMADataset}, Volume=${!!volumeDataset}`);
+            let rawDataset = chart.data.datasets.find(ds => ds.label === rawLabel);
+            let shortMADataset = chart.data.datasets.find(ds => ds.label === shortMALabel);
+            let longMADataset = chart.data.datasets.find(ds => ds.label === longMALabel);
+            let volumeDataset = volumeChart.data.datasets.find(ds => ds.label === volumeLabel);
 
-            // Create the new data points
-            const timestamp = update.timestamp;
-            
-            // Get raw score sum
-            const rawPoint: ChartPoint = { x: timestamp, y: getMetricValue(update.scores, update.signalName) };
-            
-            // >>> AVERAGE the raw score by post count <<< 
-            if (rawPoint.y !== null && update.postCount > 0) {
-                rawPoint.y /= update.postCount;
+            console.log(`[DEBUG]   Dataset Found: Raw=${!!rawDataset}, Short=${!!shortMADataset}, Long=${!!longMADataset}, Volume=${!!volumeDataset}`); // Log dataset finding result
+
+            // --- Prepare Data Points --- 
+            let rawScoreValue = getMetricValue(update.scores, signalName);
+            if (rawScoreValue !== null && update.postCount > 0) {
+                rawScoreValue /= update.postCount;
             } else if (update.postCount === 0) {
-                 rawPoint.y = 0; // Or null
+                 rawScoreValue = 0;
             }
-            // >>> END AVERAGE <<<
-
-            // Get MAs (already averaged)
-            const shortMAPoint: ChartPoint = { x: timestamp, y: getMetricValue(update.shortAvg, update.signalName) };
-            const longMAPoint: ChartPoint = { x: timestamp, y: getMetricValue(update.longAvg, update.signalName) };
+            const rawPoint: ChartPoint = { x: timestamp, y: rawScoreValue };
+            const shortMAPoint: ChartPoint = { x: timestamp, y: getMetricValue(update.shortAvg, signalName) };
+            const longMAPoint: ChartPoint = { x: timestamp, y: getMetricValue(update.longAvg, signalName) };
             const volumePoint: ChartPoint = { x: timestamp, y: update.postCount };
+            
+            console.log(`[DEBUG]   Prepared points: Raw=${rawPoint.y?.toFixed(4)}, Short=${shortMAPoint.y?.toFixed(4)}, Long=${longMAPoint.y?.toFixed(4)}, Vol=${volumePoint.y}`);
 
-             // >>> 4. Log points being added <<<
-            // console.log(`   -> Adding point: Raw=${rawPoint.y}, Short=${shortMAPoint.y}, Long=${longMAPoint.y}, Vol=${volumePoint.y}`);
-
-            // Add data points to the respective datasets if they exist
-            // Also remove old data points if buffer exceeds max window + buffer
-            const bufferTime = Date.now() - (currentTimeWindowMs + (5 * MINUTE_MS)); // Keep current window + 5min buffer
-
-            if (rawDataset?.data) {
-                (rawDataset.data as ChartPoint[]).push(rawPoint);
-                // Use 'as any' to assign filtered data back
-                rawDataset.data = (rawDataset.data as ChartPoint[]).filter(p => p.x >= bufferTime) as any;
+            // --- Add Data to Datasets --- 
+            if (correspondingPlottedSignal.showRaw && rawDataset) {
+                console.log(`[DEBUG]   Condition MET for Raw dataset.`); // Log if condition is met
+                const dataArray = rawDataset.data as ChartPoint[];
+                console.log(`[DEBUG]   Attempting push to ${rawLabel}. Current length: ${dataArray.length}`);
+                dataArray.push(rawPoint);
+                console.log(`[DEBUG]   Pushed to ${rawLabel}. New length: ${dataArray.length}`);
+                console.log(`[DEBUG]   Filtering ${rawLabel}. Length before: ${dataArray.length}. Point timestamp >= bufferTime: ${timestamp >= bufferTime}`);
+                rawDataset.data = dataArray.filter(p => p.x >= bufferTime) as any;
+                console.log(`[DEBUG]   Filtered ${rawLabel}. Length after: ${rawDataset.data.length}`);
                 chartNeedsUpdate = true;
             }
-            if (shortMADataset?.data) {
-                (shortMADataset.data as ChartPoint[]).push(shortMAPoint);
-                // Use 'as any' to assign filtered data back
-                shortMADataset.data = (shortMADataset.data as ChartPoint[]).filter(p => p.x >= bufferTime) as any;
+            if (correspondingPlottedSignal.showShortMA && shortMADataset) {
+                 console.log(`[DEBUG]   Condition MET for Short MA dataset.`); // Log if condition is met
+                const dataArray = shortMADataset.data as ChartPoint[];
+                console.log(`[DEBUG]   Attempting push to ${shortMALabel}. Current length: ${dataArray.length}`);
+                dataArray.push(shortMAPoint);
+                console.log(`[DEBUG]   Pushed to ${shortMALabel}. New length: ${dataArray.length}`);
+                 console.log(`[DEBUG]   Filtering ${shortMALabel}. Length before: ${dataArray.length}. Point timestamp >= bufferTime: ${timestamp >= bufferTime}`);
+                shortMADataset.data = dataArray.filter(p => p.x >= bufferTime) as any;
+                console.log(`[DEBUG]   Filtered ${shortMALabel}. Length after: ${shortMADataset.data.length}`);
                 chartNeedsUpdate = true;
             }
-            if (longMADataset?.data) {
-                (longMADataset.data as ChartPoint[]).push(longMAPoint);
-                // Use 'as any' to assign filtered data back
-                longMADataset.data = (longMADataset.data as ChartPoint[]).filter(p => p.x >= bufferTime) as any;
+            if (correspondingPlottedSignal.showLongMA && longMADataset) {
+                 console.log(`[DEBUG]   Condition MET for Long MA dataset.`); // Log if condition is met
+                const dataArray = longMADataset.data as ChartPoint[];
+                console.log(`[DEBUG]   Attempting push to ${longMALabel}. Current length: ${dataArray.length}`);
+                dataArray.push(longMAPoint);
+                console.log(`[DEBUG]   Pushed to ${longMALabel}. New length: ${dataArray.length}`);
+                 console.log(`[DEBUG]   Filtering ${longMALabel}. Length before: ${dataArray.length}. Point timestamp >= bufferTime: ${timestamp >= bufferTime}`);
+                longMADataset.data = dataArray.filter(p => p.x >= bufferTime) as any;
+                 console.log(`[DEBUG]   Filtered ${longMALabel}. Length after: ${longMADataset.data.length}`);
                 chartNeedsUpdate = true;
             }
-            if (volumeDataset?.data) {
-                (volumeDataset.data as ChartPoint[]).push(volumePoint);
-                // Use 'as any' to assign filtered data back
-                volumeDataset.data = (volumeDataset.data as ChartPoint[]).filter(p => p.x >= bufferTime) as any;
+            if (volumeDataset) {
+                 console.log(`[DEBUG]   Condition MET for Volume dataset.`); // Log if condition is met
+                const dataArray = volumeDataset.data as ChartPoint[];
+                console.log(`[DEBUG]   Attempting push to ${volumeLabel}. Current length: ${dataArray.length}`);
+                dataArray.push(volumePoint);
+                console.log(`[DEBUG]   Pushed to ${volumeLabel}. New length: ${dataArray.length}`);
+                 console.log(`[DEBUG]   Filtering ${volumeLabel}. Length before: ${dataArray.length}. Point timestamp >= bufferTime: ${timestamp >= bufferTime}`);
+                volumeDataset.data = dataArray.filter(p => p.x >= bufferTime) as any;
+                console.log(`[DEBUG]   Filtered ${volumeLabel}. Length after: ${volumeDataset.data.length}`);
                 chartNeedsUpdate = true;
             }
+        } else {
+            // console.log(` -> Skipping update for unplotted signal: ${signalName} (${langCode})`);
         }
     });
 
-    // >>> 5. Ensure updateCharts is called AFTER the loop <<<
+    console.log(`[DEBUG] Finished processing live updates. chartNeedsUpdate = ${chartNeedsUpdate}`);
     if (chartNeedsUpdate) {
-        console.log("Updating charts after live update processing.");
-        updateCharts(); // Update both charts if any data was added
+        updateCharts();
     }
 }
 

@@ -246,7 +246,7 @@ This document outlines the plan to build a real-time dashboard that monitors Blu
 
 15. **Lexicon Management, Dynamic Sentiment, & Advanced Filtering (⚪ To Do -> ✅ Completed):**
     *   **Goal:** Integrate lexicon management directly into the application using a database, allow sentiment analysis to use custom/dynamic emotions, enable complex boolean keyword filtering, and refactor the backend API for better signal handling.
-    *   **Progress Summary:** Database schema for lexicon storage created and implemented. Initial data ingestion script created and runnable. Admin script for lexicon management created. Sentiment analysis core logic refactored to use DB lookups and handle dynamic emotions fetched at startup. Server helper functions updated for dynamic score structures. Backend API endpoint `/api/metrics` implemented to serve dynamic metrics. Frontend updated to fetch metrics dynamically and populate UI controls. Complex filter DB schema created. Admin script `manage_filters.ts` created. Backend logic implemented to load active filters, evaluate posts against them (simple keyword matching), and aggregate/store filtered sentiment data separately. **Filter Integration:** Backend API, data fetching, MA calc, and live updates adapted for combined signals. Frontend UI selector updated. Frontend history/live update handlers adapted for combined signals.
+    *   **Progress Summary:** Database schema for lexicon storage created and implemented. Initial data ingestion script created and runnable. Admin script for lexicon management created. Sentiment analysis core logic refactored to use DB lookups and handle dynamic emotions fetched at startup. Server helper functions updated for dynamic score structures. Backend API endpoint `/api/metrics` implemented to serve dynamic metrics. Frontend updated to fetch metrics dynamically and populate UI controls. Complex filter DB schema created. Admin script `manage_filters.ts` created. Backend logic implemented to load active filters, evaluate posts against them (simple keyword matching), and aggregate/store filtered sentiment data separately. Filter Integration: Backend API, data fetching, MA calc, and live updates adapted for combined signals. Frontend UI selector updated. Frontend history/live update handlers adapted for combined signals. **Frontend live updates were debugged to ensure correct chart rendering and raw score averaging.**
     *   **Sub-tasks:**
         *   **15.1: Design & Implement Lexicon DB Schema (✅ Completed):**
             *   Define and create PostgreSQL tables (using `initializeDatabase` or a migration tool if adopted later):
@@ -316,7 +316,7 @@ This document outlines the plan to build a real-time dashboard that monitors Blu
                 *   **15.9.4: Backend - Adapt Live Updates (✅ Completed):** Modified `aggregateAndStore` and `LiveUpdateEntry` to include `signalName` and process both metric and filter data for live updates.
                 *   **15.9.5: Backend - Fix History Response Format (✅ Completed):** Refactored WebSocket handler for `requestHistory` to send data keyed by `signalName_languageCode`.
                 *   **15.9.6: Frontend - Adapt History Handling (✅ Completed):** Modified `handleHistoryData` in `public/app.ts` to parse the new history response structure and update chart datasets using `signalName` and `languageCode`.
-                *   **15.9.7: Frontend - Adapt Live Update Handling (✅ Completed):** Modified `handleLiveUpdate` in `public/app.ts` to use `signalName` from the payload to correctly route updates.
+                *   **15.9.7: Frontend - Adapt Live Update Handling (✅ Completed):** Modified `handleLiveUpdate` in `public/app.ts` to use `signalName` from the payload to correctly route updates, display live data, and average raw scores correctly.
         *   **15.10: Backend API Refactor & Signal Composition Layer (⚪ To Do):**
             *   (As previously defined - This is a larger refactor, likely deferred until after the above dynamic features are stable. Focuses on request/response API, signal definitions, backend composition).
 
@@ -325,3 +325,34 @@ This document outlines the plan to build a real-time dashboard that monitors Blu
         *   **Frontend Validation:** Implementing robust frontend validation for complex filter syntax if user input is ever allowed.
         *   **Performance Optimization:** Further optimize DB lookups for sentiment analysis (e.g., caching frequent words) or filter evaluation if bottlenecks arise.
         *   **Global Custom Metrics Integration:** UI/Backend for *adding* custom metrics via an interface rather than just the admin script.
+
+**16. Advanced Features & Refinements (⚪ To Do):**
+    *   **Goal:** Enhance filter capabilities, improve user control over the displayed data, implement a long-term data strategy, and polish the overall application.
+    *   **Sub-tasks:**
+        *   **16.1: Implement Full Complex Boolean Filter Logic (Backend) (⚪ To Do):**
+            *   Extend the filter evaluation logic in `processPost` (Task 15.8.4) to support full boolean expressions (AND, OR, NOT, parentheses) in the `filter_query` field.
+            *   Requires a robust parsing and evaluation mechanism for the filter queries.
+        *   **16.2: Implement User-Facing Filter Management (Basic UI) (⚪ To Do):**
+            *   **Backend:** Add an API endpoint (e.g., `/api/filters`) to list available complex filters (from `complex_keyword_filters`) and potentially another endpoint to update the `is_active` status for a user (or globally, TBD).
+            *   **Frontend:** Create a UI section (e.g., a modal or dedicated panel) to display the list of available filters with toggles or buttons for users to activate/deactivate them for their view (or globally, depending on design).
+        *   **16.3: Enhance Signal Plotting UI (⚪ To Do):**
+            *   **Signal Visibility Toggles:** Modify the UI to allow users to temporarily hide/show individual plotted signals (datasets) on the charts without removing them from the `plottedSignals` list. This involves managing dataset visibility state in Chart.js.
+            *   **Improved Signal Selection:** Refine the UI/UX for adding new signals to the chart.
+        *   **16.4: Implement Long-Term Data Retention & Cold Storage Strategy (⚪ To Do):**
+            *   **Define Strategy:** Research and decide on a cold storage mechanism (e.g., archiving to S3/Cloud Storage, another database table/instance optimized for storage).
+            *   **Modify Pruning:** Update the data pruning logic (currently in `aggregateAndStore`) to keep data up to 1 year in the primary `sentiment_data` / `complex_filter_sentiment_data` tables.
+            *   **Implement Archiving:** Create a process (e.g., a scheduled script or background task) to move data older than 1 year from the primary tables to the chosen cold storage solution.
+            *   **(Optional) Data Retrieval:** Define if/how data from cold storage can be queried or re-hydrated if needed (likely out of scope for initial implementation).
+        *   **16.5: Improve Application Configuration Management (⚪ To Do):**
+            *   Review hardcoded constants (e.g., pruning intervals, aggregation intervals, default time windows).
+            *   Move key configurable parameters to environment variables (`.env` file support) or a dedicated configuration file (`config.ts`/`config.json`).
+            *   Ensure configuration is loaded correctly at startup.
+        *   **16.6: General UI/UX Polish (⚪ To Do):**
+            *   Add loading indicators during data fetches (initial history, metric loading).
+            *   Improve error handling and display user-friendly error messages (e.g., WebSocket disconnects, failed requests).
+            *   Enhance layout responsiveness for different screen sizes.
+            *   Review and refine tooltips, labels, and overall visual consistency.
+
+**Future Enhancements:**
+
+*   **(Placeholder):** Consider further enhancements based on user feedback and evolving requirements.
