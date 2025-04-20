@@ -23,6 +23,7 @@ import moment from 'moment'; // Import moment
 Chart.register(...registerables);
 
 // --- Interfaces (Mirror Backend/Sentiment) ---
+// Defines the structure for sentiment scores (count per category).
 interface SentimentScores {
     anger: number;
     anticipation: number;
@@ -36,7 +37,7 @@ interface SentimentScores {
     negative: number;
 }
 
-// Keep this simple for now, details come from server MAs
+// Defines the structure for an aggregated data point from the server (raw data).
 interface AggregatedScoreEntry {
     timestamp: number;
     scores: SentimentScores;
@@ -45,6 +46,7 @@ interface AggregatedScoreEntry {
 }
 
 // --- State Variables ---
+// Holds references to the Chart.js instances.
 let chartInstances: {
     sentimentChart: Chart | null;
     volumeChart: Chart | null;
@@ -68,6 +70,7 @@ let chartInstances: {
     surprise: null,
     trust: null
 };
+// Defines the base colors used for different emotion charts (obsolete?).
 const colors = {
     anger: 'rgba(255, 99, 132, 0.8)',
     anticipation: 'rgba(255, 159, 64, 0.8)',
@@ -79,25 +82,27 @@ const colors = {
     trust: 'rgba(100, 180, 120, 0.8)',
     // Colors for MA lines will be handled dynamically
 };
+// Label used for the net sentiment line on the main chart.
 const netSentimentLabel = 'Net Sentiment (Pos - Neg)';
 
-// Store data received from backend, keyed by language
+// Stores the historical and live data received from the WebSocket backend, keyed by language code (e.g., 'eng').
 let currentChartData: { [lang: string]: HistoryEntry[] } = {};
 
-// Time window state
-const DEFAULT_WINDOW_HOURS = 24;
+// --- Time Window Configuration ---
+const DEFAULT_WINDOW_HOURS = 24; // Initial time range displayed.
 const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
-let currentTimeWindowMs = DEFAULT_WINDOW_HOURS * HOUR_MS;
+let currentTimeWindowMs = DEFAULT_WINDOW_HOURS * HOUR_MS; // Currently selected time window in milliseconds.
 
-// WebSocket state
-let socket: WebSocket | null = null;
-let reconnectInterval: number | null = null;
-const RECONNECT_DELAY = 5000; // 5 seconds
-const AGGREGATION_INTERVAL_MS = 10 * 1000; // Used for requesting interval
+// --- WebSocket Configuration ---
+let socket: WebSocket | null = null; // Holds the WebSocket connection object.
+let reconnectInterval: number | null = null; // Timer ID for reconnection attempts.
+const RECONNECT_DELAY = 5000; // Delay (ms) before trying to reconnect after a disconnect.
+const AGGREGATION_INTERVAL_MS = 10 * 1000; // Backend's aggregation interval (used to request appropriate granularity).
 
-// Define Available Languages (Mirroring backend TARGET_LANGUAGES keys)
-// TODO: Ideally, fetch this from backend or derive from initial data
+// --- Language Configuration ---
+// List of languages available for selection in the UI.
+// Should ideally match the languages supported by the backend lexicon.
 const AVAILABLE_LANGUAGES: { code: string, name: string }[] = [
     { code: 'eng', name: 'English' },
     { code: 'fra', name: 'French' },
@@ -121,9 +126,11 @@ const AVAILABLE_LANGUAGES: { code: string, name: string }[] = [
     { code: 'ben', name: 'Bengali' }
 ];
 
+// Currently selected languages (deprecated? Signals are now individually selected).
 let selectedLanguages: string[] = ['eng']; // Default selection
 
-// Define types needed from backend messages
+// --- Backend Data Types ---
+// Defines the structure of a single historical data entry received from the backend.
 interface HistoryEntry {
     timestamp: number;
     scores: SentimentScores;
@@ -131,10 +138,12 @@ interface HistoryEntry {
     shortAvg?: SentimentScores | null;
     longAvg?: SentimentScores | null;
 }
+// Defines the structure for historical data for a single language.
 interface LanguageHistoryData {
     language: string;
     data: HistoryEntry[];
 }
+// Defines the structure for a single live update entry from the backend.
 interface LiveUpdateEntry {
     language: string;
     timestamp: number;
@@ -143,17 +152,18 @@ interface LiveUpdateEntry {
     shortAvg?: SentimentScores | null;
     longAvg?: SentimentScores | null;
 }
-// Combined type for received data
+// Type alias for the historical data message received from the WebSocket.
 type ServerHistoryData = { type: 'historyData', payload: { results: LanguageHistoryData[] } };
+// Type alias for the live update message received from the WebSocket.
 type ServerLiveUpdate = { type: 'liveUpdate', payload: { updates: LiveUpdateEntry[] } };
+// Combined type for any message received from the WebSocket server.
 type ReceivedServerMessage = ServerHistoryData | ServerLiveUpdate;
 
 // --- Color Generation ---
-// Simple function to generate distinct colors - can be improved
-// Or use a predefined palette array
+// Cache to store assigned colors for languages to ensure consistency.
 const languageColorCache: { [langCode: string]: string } = {};
-let colorIndex = 0;
-const baseColors = [ // Basic palette
+let colorIndex = 0; // Index for picking from the base color palette.
+const baseColors = [ // A basic palette for assigning colors to languages/signals.
     'rgba(54, 162, 235, 1)',   // Blue
     'rgba(255, 99, 132, 1)',   // Red
     'rgba(75, 192, 192, 1)',   // Teal
@@ -164,6 +174,12 @@ const baseColors = [ // Basic palette
     'rgba(201, 203, 207, 1)'  // Grey
 ];
 
+/**
+ * Gets a consistent color for a given language code.
+ * Uses a cache and a rotating palette (baseColors).
+ * @param langCode The ISO 639-3 language code (e.g., 'eng').
+ * @returns A color string (e.g., 'rgba(54, 162, 235, 1)').
+ */
 function getLanguageColor(langCode: string): string {
     if (!languageColorCache[langCode]) {
         languageColorCache[langCode] = baseColors[colorIndex % baseColors.length];
@@ -172,7 +188,14 @@ function getLanguageColor(langCode: string): string {
     return languageColorCache[langCode];
 }
 
-// Helper to slightly modify color alpha/style for MA lines
+/**
+ * Modifies a base color string (intended for MA lines).
+ * Currently makes the 'short' MA line fainter.
+ * @param color The base RGBA color string.
+ * @param type Whether it's for the 'short' or 'long' moving average.
+ * @returns A modified RGBA color string.
+ * @deprecated This approach is less flexible than getSignalStyle.
+ */
 function modifyColor(color: string, type: 'short' | 'long'): string {
     if (type === 'short') {
         return color.replace(', 1)', ', 0.4)'); // Fainter for short MA
@@ -181,6 +204,10 @@ function modifyColor(color: string, type: 'short' | 'long'): string {
 }
 
 // --- WebSocket Connection ---
+/**
+ * Establishes and manages the WebSocket connection to the backend server.
+ * Handles opening, receiving messages, errors, and automatic reconnection.
+ */
 function connectWebSocket() {
     const wsUrl = `ws://${window.location.host}`;
     console.log(`Connecting WebSocket to ${wsUrl}`);
@@ -241,6 +268,11 @@ function connectWebSocket() {
 }
 
 // --- Request Data Function ---
+/**
+ * Sends a 'requestHistory' message to the WebSocket server.
+ * Determines the required languages based on the currently plotted signals.
+ * Calculates a desired data interval based on the current time window for efficiency.
+ */
 function requestHistoryData() {
     if (socket && socket.readyState === WebSocket.OPEN) {
         // Determine unique languages needed from plotted signals
@@ -287,7 +319,16 @@ function requestHistoryData() {
 
 // --- Chart Utilities ---
 
-// Helper to create dataset configuration
+/**
+ * Creates a basic dataset configuration object for Chart.js.
+ * @param languageCode The language code this dataset belongs to.
+ * @param label The display label for the dataset.
+ * @param data The chart data points ({x: timestamp, y: value}).
+ * @param color The base color for the dataset.
+ * @param options Additional Chart.js dataset options to merge.
+ * @returns A Chart.js dataset configuration object.
+ * @deprecated Replaced by createSignalDatasetConfig for more specific styling.
+ */
 function createDatasetConfig(
     languageCode: string,
     label: string,
@@ -310,7 +351,15 @@ function createDatasetConfig(
     };
 }
 
-// Helper to get the specific metric value from a data entry
+/**
+ * Extracts a specific metric value (e.g., 'netSentiment', 'joy') from a data entry.
+ * Handles retrieving raw scores, short MA, or long MA values.
+ * Normalizes raw scores by the postCount if applicable.
+ * @param entry The data entry (HistoryEntry or LiveUpdateEntry).
+ * @param metric The metric identifier (e.g., 'netSentiment', 'joy').
+ * @param type Whether to retrieve the 'raw' score, 'short' MA, or 'long' MA.
+ * @returns The calculated metric value, or null if unavailable or invalid.
+ */
 function getMetricValue(entry: HistoryEntry | LiveUpdateEntry, metric: string, type: 'raw' | 'short' | 'long'): number | null {
     let source: SentimentScores | null | undefined;
     let count = entry.postCount; // Needed for raw normalization
@@ -350,6 +399,13 @@ function getMetricValue(entry: HistoryEntry | LiveUpdateEntry, metric: string, t
 }
 
 // --- Chart Initialization ---
+/**
+ * Creates the configuration object for the time (X) axis in Chart.js.
+ * Uses the 'chartjs-adapter-moment' for time handling.
+ * Configures display formats and tooltip formats.
+ * Includes a custom tick callback to display relative time labels (e.g., '-5m', '-2h').
+ * @returns A Chart.js scale configuration object for the time axis.
+ */
 function createTimeAxisOptions(): any { // Use any for now, specific Chart.js types can be complex
     return {
         type: 'time' as ScaleType, // Explicitly cast
@@ -391,6 +447,12 @@ function createTimeAxisOptions(): any { // Use any for now, specific Chart.js ty
     };
 }
 
+/**
+ * Initializes the main sentiment chart and the volume chart instances.
+ * Destroys any existing chart instances first.
+ * Sets up common options (responsiveness, time axis, tooltips, legend).
+ * Creates the 'line' chart for sentiment trends and the 'bar' chart for volume.
+ */
 function initializeCharts() {
     console.log("Initializing simplified charts...");
 
@@ -472,6 +534,11 @@ function initializeCharts() {
 
 // --- Chart Update Logic ---
 
+/**
+ * Updates all active chart instances.
+ * Sets the minimum and maximum time on the X-axis based on `currentTimeWindowMs`.
+ * Calls `chart.update('none')` to redraw the charts without animation.
+ */
 function updateCharts() {
     const now = Date.now();
     const minTime = now - currentTimeWindowMs;
@@ -490,7 +557,14 @@ function updateCharts() {
     // console.log("Charts updated."); // Optional debug log
 }
 
-// Process historical data and update charts completely
+/**
+ * Processes the full historical dataset received from the backend (`historyData` message).
+ * Clears existing local data (`currentChartData`) and chart datasets.
+ * Stores the received data locally.
+ * Rebuilds all datasets for both the sentiment and volume charts based on the currently defined `plottedSignals`.
+ * Calls `updateCharts()` to refresh the display.
+ * @param results An array of `LanguageHistoryData` objects from the backend.
+ */
 function handleHistoryData(results: LanguageHistoryData[]) {
     console.log("Processing historyData for dynamic signals...");
     // *** DEBUG: Log the state of plottedSignals ***
@@ -587,7 +661,14 @@ function handleHistoryData(results: LanguageHistoryData[]) {
     console.log("Charts updated with dynamically plotted signals from history.");
 }
 
-// Handle incoming live data points (Normalize Raw, Plot MA Direct)
+/**
+ * Processes incoming live data points (`liveUpdate` message).
+ * Iterates through updates, checking if the language is relevant based on `plottedSignals`.
+ * Adds the new data point to the corresponding datasets in both charts.
+ * Prunes old data points that fall outside the `currentTimeWindowMs`.
+ * Calls `sortVolumeDatasets` and `updateCharts` if any data was modified.
+ * @param updates An array of `LiveUpdateEntry` objects from the backend.
+ */
 function handleLiveUpdate(updates: LiveUpdateEntry[]) {
     const minTime = Date.now() - currentTimeWindowMs;
     let needsUpdate = false;
@@ -686,7 +767,12 @@ function handleLiveUpdate(updates: LiveUpdateEntry[]) {
     }
 }
 
-// *** ADDED: Helper function to sort volume datasets for stacking ***
+/**
+ * Sorts the datasets in the volume chart (stacked bar chart) by their total volume
+ * within the current time window, in descending order.
+ * This ensures that the largest volume bars appear at the bottom of the stack.
+ * @param chart The Chart.js instance for the volume chart.
+ */
 function sortVolumeDatasets(chart: Chart | null) {
     // Simplified check: Assume if called on volumeChart, it's a stacked bar chart
     if (!chart || !chart.data?.datasets) {
@@ -720,7 +806,12 @@ function sortVolumeDatasets(chart: Chart | null) {
     chart.data.datasets.forEach((dataset: any) => delete dataset.totalVolume);
 }
 
-// --- UI Controls Setup --- (Refactored)
+// --- UI Controls Setup ---
+/**
+ * Sets up event listeners and populates dropdowns for the UI controls.
+ * Handles the "Add Signal" button, the signal configuration popup (language, metric, color, types),
+ * the time window selector, and the list of currently plotted signals.
+ */
 function setupControls() {
     console.log("Setting up controls..."); // Add entry log
 
@@ -849,7 +940,7 @@ function setupControls() {
     console.log("Controls setup complete."); // Add exit log
 }
 
-// Available Metrics for Selection
+// Available Metrics for Selection in the UI dropdown.
 const AVAILABLE_METRICS: { [key: string]: string } = {
     netSentiment: 'Net Sentiment (Pos-Neg)',
     anger: 'Anger',
@@ -861,9 +952,13 @@ const AVAILABLE_METRICS: { [key: string]: string } = {
     surprise: 'Surprise',
     trust: 'Trust',
 };
+// Helper array containing only the emotion keys (excluding 'netSentiment').
 const emotionKeys = Object.keys(AVAILABLE_METRICS).filter(k => k !== 'netSentiment'); // Helper
 
-// Configuration for a single plotted signal
+/**
+ * Defines the configuration for a single signal to be plotted on the charts.
+ * Includes language, metric, color, and which data types (raw, short MA, long MA) to show.
+ */
 interface PlottedSignalConfig {
     id: string; // Unique ID for removal, e.g., "lang-metric-timestamp"
     languageCode: string;
@@ -874,8 +969,8 @@ interface PlottedSignalConfig {
     showLongMA: boolean;
 }
 
-// Store configurations of currently plotted signals
-// *** Initialize with a default signal including color ***
+// Stores the configurations of all signals currently being displayed.
+// Initialized with a default signal (English Net Sentiment).
 let plottedSignals: PlottedSignalConfig[] = [
     {
         id: `eng-netSentiment-${Date.now()}`,
@@ -888,7 +983,11 @@ let plottedSignals: PlottedSignalConfig[] = [
     }
 ];
 
-// *** Function to Update the Plotted Signals List in the UI (Moved Earlier, Type Added) ***
+/**
+ * Updates the list of plotted signals displayed in the UI.
+ * Clears the existing list and rebuilds it based on the `plottedSignals` array.
+ * Adds remove buttons for each signal.
+ */
 function updatePlottedSignalsUI() {
     const listContainer = document.getElementById('plottedSignalsList');
     if (!listContainer) return;
@@ -942,7 +1041,13 @@ function updatePlottedSignalsUI() {
     listContainer.appendChild(ul);
 }
 
-// Helper to get style based on signal's color and type
+/**
+ * Determines the visual style (color, line style, thickness, points) for a dataset
+ * based on the signal's base color and the data type (raw, short MA, long MA).
+ * @param signalColor The base hex color chosen for the signal.
+ * @param type The type of data ('raw', 'short', 'long').
+ * @returns A style configuration object for a Chart.js dataset.
+ */
 function getSignalStyle(signalColor: string, type: 'raw' | 'short' | 'long'): { color: string, borderDash?: number[], borderWidth: number, tension?: number, pointRadius?: number, pointHoverRadius?: number } {
     const baseColor = signalColor; // Use the signal's specific color
     switch (type) {
@@ -959,7 +1064,12 @@ function getSignalStyle(signalColor: string, type: 'raw' | 'short' | 'long'): { 
     }
 }
 
-// *** ADDED: Helper to convert HEX to RGBA ***
+/**
+ * Converts a HEX color code (e.g., '#FF0000') to an RGBA string.
+ * @param hex The HEX color string (3 or 6 digits, with '#').
+ * @param alpha The desired alpha transparency (0.0 to 1.0).
+ * @returns An RGBA color string (e.g., 'rgba(255, 0, 0, 0.5)').
+ */
 function hexToRgba(hex: string, alpha: number): string {
     let r = 0, g = 0, b = 0;
     // 3 digits
@@ -976,7 +1086,16 @@ function hexToRgba(hex: string, alpha: number): string {
     return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
-// Helper to create dataset configuration (Refactored labels and color usage)
+/**
+ * Creates a complete Chart.js dataset configuration object for a specific signal and data type.
+ * Uses `getSignalStyle` to determine the visual appearance.
+ * Generates an appropriate label for the dataset legend.
+ * Includes custom properties (`signalId`, `datasetType`) for easier identification later.
+ * @param signal The `PlottedSignalConfig` object.
+ * @param type The type of data ('raw', 'short', 'long').
+ * @param data The actual data points ({x: timestamp, y: value}).
+ * @returns A Chart.js dataset configuration object.
+ */
 function createSignalDatasetConfig(
     signal: PlottedSignalConfig,
     type: 'raw' | 'short' | 'long',
@@ -1011,6 +1130,7 @@ function createSignalDatasetConfig(
 }
 
 // --- Initialization ---
+// Main entry point: Runs when the HTML document is fully loaded and parsed.
 document.addEventListener('DOMContentLoaded', () => {
     console.log("DOM Content Loaded - Initializing dynamic signal plotting UI");
     initializeCharts(); // Initialize the two base charts

@@ -15,11 +15,13 @@ const { Pool } = pg;
 import dotenv from 'dotenv';
 
 // --- Database Setup ---
+// Validate that the DATABASE_URL environment variable is set.
 if (!process.env.DATABASE_URL) {
     console.error('CRITICAL: DATABASE_URL environment variable is not set.');
     process.exit(1);
 }
 
+// Create a PostgreSQL connection pool using the DATABASE_URL.
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     // Fly.io may require SSL depending on the network, but the internal connection string usually disables it.
@@ -29,7 +31,14 @@ const pool = new Pool({
     // }
 });
 
-// Database initialization function
+/**
+ * Initializes the PostgreSQL database.
+ * Ensures the `sentiment_data` table exists with the correct schema.
+ * Creates an index on the timestamp column for faster querying.
+ * Exits the process if initialization fails.
+ * @async
+ * @throws {Error} If database connection or query execution fails.
+ */
 async function initializeDatabase() {
     console.log('Initializing database...');
     try {
@@ -56,14 +65,16 @@ async function initializeDatabase() {
     }
 }
 
-// Calculate paths from project root (current working directory)
+// Calculate absolute paths for serving static files.
 const PROJECT_ROOT = process.cwd();
 const PUBLIC_DIR = path.join(PROJECT_ROOT, 'public');
 const INDEX_HTML_PATH = path.join(PUBLIC_DIR, 'index.html');
 
 // --- HTTP and WebSocket Server Setup ---
+// Read port from environment or default to 3000.
 const PORT = parseInt(process.env.PORT || '3000');
 
+// Create an HTTP server to serve the static frontend files.
 const server = http.createServer((req, res) => {
     console.log(`HTTP Request: ${req.method} ${req.url}`);
 
@@ -106,30 +117,35 @@ const server = http.createServer((req, res) => {
     });
 });
 
+// Create a WebSocket server instance attached to the HTTP server.
 const wss = new WebSocketServer({ server });
 
 console.log(`HTTP and WebSocket server started on port ${PORT}`);
 
-// --- Constants for Time Ranges ---
+// --- Constants for Time Ranges and Aggregation ---
 const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
 const ONE_DAY_MS = 24 * HOUR_MS;
 const ONE_WEEK_MS = 7 * ONE_DAY_MS;
 const ONE_MONTH_MS = 30 * ONE_DAY_MS;
 const MAX_HISTORY_MS = ONE_MONTH_MS;
-const PRUNE_AGE_MS = 31 * ONE_DAY_MS;
+const PRUNE_AGE_MS = 31 * ONE_DAY_MS; // Data older than this might be pruned (currently not implemented).
 
-// Constants for aggregation
+// The interval at which raw data is aggregated and stored (e.g., 10 seconds).
 const AGGREGATION_INTERVAL_MS = 10 * 1000;
 
-// Constants for Moving Averages (mirroring frontend)
+// Window sizes for calculating short-term and long-term moving averages.
 const SHORT_AVG_WINDOW_MS = 5 * MINUTE_MS;
 const LONG_AVG_WINDOW_MS = 1 * HOUR_MS;
 
-// *** ADDED: Buffer duration slightly larger than Long MA window ***
+// Duration of recent data to keep in the in-memory buffer for historical requests
+// and for calculating live MAs incrementally. Should be slightly larger than the longest MA window.
 const LIVE_UPDATE_BUFFER_MS = LONG_AVG_WINDOW_MS + (5 * MINUTE_MS); // Keep a bit more than 1hr
 
-// Function to broadcast data to all connected clients
+/**
+ * Broadcasts data (usually LiveUpdateMessage) to all connected WebSocket clients.
+ * @param {any} data The data object to broadcast (will be JSON.stringified).
+ */
 function broadcast(data: any): void {
     const jsonData = JSON.stringify(data);
     wss.clients.forEach(client => {
@@ -144,6 +160,9 @@ function broadcast(data: any): void {
 }
 
 // --- WebSocket Message Types ---
+// Define the structure for messages exchanged between client and server.
+
+/** Message sent by the client to request historical data. */
 interface RequestHistoryMessage {
     type: 'requestHistory';
     payload: {
@@ -153,6 +172,7 @@ interface RequestHistoryMessage {
     };
 }
 
+/** Structure for a single aggregated data point including calculated MAs (used in history/live updates). */
 interface HistoryEntry {
     timestamp: number;
     scores: SentimentScores; // Raw aggregated scores for the interval
@@ -162,11 +182,13 @@ interface HistoryEntry {
     longAvg?: SentimentScores | null;
 }
 
+/** Structure for historical data for a single language. */
 interface LanguageHistoryData {
     language: string;
     data: HistoryEntry[];
 }
 
+/** Message sent by the server containing requested historical data. */
 interface HistoryDataMessage {
     type: 'historyData';
     payload: {
@@ -174,6 +196,7 @@ interface HistoryDataMessage {
     };
 }
 
+/** Structure for a single live update data point. */
 interface LiveUpdateEntry {
     language: string;
     timestamp: number;
@@ -184,6 +207,7 @@ interface LiveUpdateEntry {
     longAvg?: SentimentScores | null;
 }
 
+/** Message sent by the server containing live data updates. */
 interface LiveUpdateMessage {
     type: 'liveUpdate';
     payload: {
@@ -191,13 +215,18 @@ interface LiveUpdateMessage {
     };
 }
 
+/** Type alias for messages the client can send. */
 type ClientMessage = RequestHistoryMessage; // Add other types if needed
+/** Type alias for messages the server can send. */
 type ServerMessage = HistoryDataMessage | LiveUpdateMessage; // Add other types if needed
 
+// --- WebSocket Connection Handling ---
+// Set up listeners for new WebSocket connections.
 wss.on('connection', async (ws: WebSocket) => {
     console.log('Client connected');
-    // Initial history load is now triggered by client message
+    // Initial history load is now triggered by a client 'requestHistory' message.
 
+    // Listener for messages received from a specific client.
     ws.on('message', async (message: Buffer) => {
         let parsedMessage: ClientMessage;
         try {
@@ -219,13 +248,13 @@ wss.on('connection', async (ws: WebSocket) => {
 
                 console.log(`Handling requestHistory for ${languages.join(',')}, window ${timeWindowMs/1000/60}m, interval ${desiredIntervalMs/1000}s`);
 
-                // 1. Get aggregated data
+                // 1. Get aggregated data from the database based on the requested parameters.
                 const aggregatedData = await getAggregatedData(languages, startTime, endTime, desiredIntervalMs);
 
-                // 2. Calculate MAs
+                // 2. Calculate short-term and long-term moving averages for the aggregated data.
                 const dataWithMAs = calculateMAsForAggregatedData(aggregatedData, desiredIntervalMs, SHORT_AVG_WINDOW_MS, LONG_AVG_WINDOW_MS);
 
-                // 3. Format response
+                // 3. Format the data into the structure expected by the client.
                 const results: LanguageHistoryData[] = [];
                 dataWithMAs.forEach((data, lang) => {
                     results.push({ language: lang, data: data });
@@ -249,10 +278,12 @@ wss.on('connection', async (ws: WebSocket) => {
         }
     });
 
+    // Listener for when a client connection is closed.
     ws.on('close', () => {
         console.log('Client disconnected');
     });
 
+    // Listener for errors occurring on a client connection.
     ws.on('error', (error: Error) => {
         console.error('WebSocket client error:', error);
     });
@@ -260,7 +291,7 @@ wss.on('connection', async (ws: WebSocket) => {
 
 // --- Data Structures for Aggregation ---
 
-// Represents the aggregated scores for a single time interval
+/** Represents the raw aggregated scores for a single time interval (before MAs). */
 interface AggregatedScoreEntry {
     timestamp: number | Date;
     scores: SentimentScores;
@@ -268,20 +299,24 @@ interface AggregatedScoreEntry {
     language?: string; // Add optional language field for type safety later
 }
 
-// Temporary accumulators for the current interval (keyed by language)
+// Temporary accumulators holding the sum of scores and post counts for the *current*
+// aggregation interval, keyed by language code (e.g., 'eng'). Reset every AGGREGATION_INTERVAL_MS.
 let currentIntervalScores: { [lang: string]: SentimentScores } = {};
 let currentIntervalPostCount: { [lang: string]: number } = {};
 
-// *** ADDED: In-memory buffer for recent history (for history requests) ***
+// In-memory buffer holding recent `HistoryEntry` data points (including MAs).
+// Used to quickly serve `requestHistory` messages for recent time windows and
+// as the basis for incremental live MA calculations. Pruned periodically.
 let recentHistoryBuffer: { [lang: string]: HistoryEntry[] } = {};
 
-// *** ADDED: State for incremental live MA calculation ***
+/** State required for calculating a moving average incrementally (one per MA type per language). */
 interface WindowState {
     queue: HistoryEntry[]; // Holds entries currently in the window
     summedScores: SentimentScores;
     summedPostCount: number;
     windowPoints: number; // Max size of the queue
 }
+// Holds the state for incremental calculation of short and long MAs for each active language.
 let liveMAState: {
     [lang: string]: {
         short: WindowState;
@@ -289,12 +324,20 @@ let liveMAState: {
     }
 } = {};
 
-// Helper function to create an empty scores object (used for initializing language buckets)
+/**
+ * Helper function to create an empty SentimentScores object with all categories initialized to 0.
+ * @returns {SentimentScores} An empty scores object.
+ */
 function createEmptyScores(): SentimentScores {
     return { anger: 0, anticipation: 0, disgust: 0, fear: 0, joy: 0, sadness: 0, surprise: 0, trust: 0, positive: 0, negative: 0 };
 }
 
-// Helper function to add scores from one object to another
+/**
+ * Helper function to add the values from a source SentimentScores object to a target object.
+ * Modifies the target object in place.
+ * @param {SentimentScores} target The scores object to add to.
+ * @param {SentimentScores} source The scores object to add from.
+ */
 function addScores(target: SentimentScores, source: SentimentScores): void {
     for (const key in source) {
         if (target.hasOwnProperty(key)) {
@@ -303,7 +346,12 @@ function addScores(target: SentimentScores, source: SentimentScores): void {
     }
 }
 
-// *** ADDED: Helper to subtract scores ***
+/**
+ * Helper function to subtract the values from a source SentimentScores object from a target object.
+ * Modifies the target object in place. Used for removing elements from MA windows.
+ * @param {SentimentScores} target The scores object to subtract from.
+ * @param {SentimentScores} source The scores object to subtract.
+ */
 function subtractScores(target: SentimentScores, source: SentimentScores): void {
     for (const key in source) {
         if (target.hasOwnProperty(key)) {
@@ -312,7 +360,14 @@ function subtractScores(target: SentimentScores, source: SentimentScores): void 
     }
 }
 
-// *** ADDED: Helper function for incremental MA calculation ***
+/**
+ * Updates the state for an incremental moving average window.
+ * Adds the new entry, removes the oldest entry if the window size is exceeded,
+ * and recalculates the average scores based on the current window contents.
+ * @param {WindowState} state The current state of the moving average window.
+ * @param {HistoryEntry} newEntry The new data entry to add to the window.
+ * @returns {SentimentScores | null} The calculated average scores for the window, or null if the window has no posts.
+ */
 function updateIncrementalWindowState(state: WindowState, newEntry: HistoryEntry): SentimentScores | null {
     // Add new entry to sums and queue
     addScores(state.summedScores, newEntry.scores);
@@ -343,7 +398,9 @@ function updateIncrementalWindowState(state: WindowState, newEntry: HistoryEntry
 
 // --- Interface Definitions ---
 
-// Added export
+/**
+ * Defines the structure of commit metadata passed from the FirehoseSubscription callback.
+ */
 export interface CommitData {
     repo: string;
     time: string;
@@ -352,8 +409,18 @@ export interface CommitData {
 }
 
 let postCounter = 0;
-const THROTTLE_FACTOR = 1; // Process every post for now
+const THROTTLE_FACTOR = 1; // Process 1 out of every N posts (1 = process all).
 
+/**
+ * Callback function passed to the FirehoseSubscription.
+ * Called for each `app.bsky.feed.post` record extracted from the firehose.
+ * Performs language detection, sentiment analysis (if language is supported),
+ * and updates the temporary accumulators (`currentIntervalScores`, `currentIntervalPostCount`).
+ * Implements basic throttling using `THROTTLE_FACTOR`.
+ *
+ * @param {AppBskyFeedPost.Record} postRecord The parsed post record.
+ * @param {CommitData} commitData Metadata about the commit containing the post.
+ */
 function processPost(postRecord: AppBskyFeedPost.Record, commitData: CommitData): void {
     postCounter++;
     if (postCounter % THROTTLE_FACTOR !== 0) {
@@ -384,9 +451,15 @@ function processPost(postRecord: AppBskyFeedPost.Record, commitData: CommitData)
     }
 }
 
-// --- Reusable Moving Average Helper ---
-// Revert to returning null when MA cannot be calculated -- ** No longer strictly true, will calc on partial **
-// ** This function is now less relevant for sentiment MAs, kept for potential other uses **
+// --- Reusable Moving Average Helper Functions ---
+
+/**
+ * Calculates a simple moving average for an array of numbers or nulls.
+ * @param data An array of numbers or nulls.
+ * @param windowSize The number of data points in the moving average window.
+ * @returns An array of the same length containing the calculated averages or nulls.
+ * @deprecated Less relevant now due to `calculateSentimentMovingAverage`.
+ */
 function calculateNumericMovingAverage(data: (number | null)[], windowSize: number): (number | null)[] {
     if (windowSize <= 0) {
         // Return array of nulls if window size is invalid
@@ -420,7 +493,14 @@ function calculateNumericMovingAverage(data: (number | null)[], windowSize: numb
     return result;
 }
 
-// Revert to returning null SentimentScores when MA cannot be calculated -- ** Now calculates on partial windows **
+/**
+ * Calculates moving averages for sentiment scores, weighted by post count.
+ * Handles partial windows at the beginning of the data series.
+ * @param {HistoryEntry[]} data Array of aggregated data entries (timestamp, scores, postCount).
+ * @param {number} windowPoints The number of data points (intervals) in the moving average window.
+ * @returns {Array<SentimentScores | null>} An array of the same length containing the calculated
+ *          average SentimentScores for each point, or null if the window had zero posts.
+ */
 function calculateSentimentMovingAverage(data: HistoryEntry[], windowPoints: number): (SentimentScores | null)[] {
      const result: (SentimentScores | null)[] = Array(data.length).fill(null); // Initialize with nulls
      const categories = Object.keys(createEmptyScores()) as (keyof SentimentScores)[];
@@ -461,12 +541,27 @@ function calculateSentimentMovingAverage(data: HistoryEntry[], windowPoints: num
      return result;
 }
 
-// --- Server-Side Data Aggregation ---
+// --- Server-Side Data Aggregation and Retrieval ---
+
+/** Represents a raw row fetched from the `sentiment_data` table. */
 interface RawDbEntry extends AggregatedScoreEntry {
     language: string;
     timestamp: Date; // Comes from DB as Date
 }
 
+/**
+ * Fetches raw sentiment data from the database for the specified languages and time range,
+ * then aggregates it into buckets based on the desired `intervalMs`.
+ * Averages the scores within each bucket based on the number of raw data points contributing to it.
+ *
+ * @param {string[]} languages Array of ISO 639-3 language codes to fetch.
+ * @param {Date} startTime The start of the time range (inclusive).
+ * @param {Date} endTime The end of the time range (exclusive).
+ * @param {number} intervalMs The desired aggregation interval in milliseconds.
+ * @returns {Promise<Map<string, HistoryEntry[]>>} A Promise resolving to a Map where keys are language codes
+ *          and values are arrays of aggregated `HistoryEntry` objects, sorted by timestamp.
+ * @async
+ */
 async function getAggregatedData(
     languages: string[],
     startTime: Date,
@@ -515,7 +610,7 @@ async function getAggregatedData(
             const timestamp = parseInt(tsString, 10);
             const avgScores = { ...bucketData.scores };
 
-            // Average the scores based on the number of raw points in the bucket
+            // Average the scores based on the number of raw data points (from 10s intervals) in the bucket
             if (bucketData.numPoints > 0) {
                  for (const scoreKey in avgScores) {
                     avgScores[scoreKey as keyof SentimentScores] /= bucketData.numPoints;
@@ -542,7 +637,17 @@ async function getAggregatedData(
     return resultByLang;
 }
 
-// --- Server-Side Moving Average Calculation ---
+/**
+ * Calculates short-term and long-term moving averages for pre-aggregated sentiment data.
+ * Modifies the input `aggregatedData` map by adding `shortAvg` and `longAvg` properties
+ * to each `HistoryEntry` object.
+ *
+ * @param {Map<string, HistoryEntry[]>} aggregatedData Map of language codes to arrays of aggregated data (output from `getAggregatedData`).
+ * @param {number} intervalMs The aggregation interval used for the input data (e.g., 60000 for 1 minute).
+ * @param {number} shortWindowMs The window size in milliseconds for the short-term MA.
+ * @param {number} longWindowMs The window size in milliseconds for the long-term MA.
+ * @returns {Map<string, HistoryEntry[]>} The input map, modified with calculated MA values.
+ */
 function calculateMAsForAggregatedData(
     aggregatedData: Map<string, HistoryEntry[]>, 
     intervalMs: number,
@@ -571,6 +676,18 @@ function calculateMAsForAggregatedData(
 }
 
 // --- Aggregation Timer & Live Update Logic ---
+
+/**
+ * Function executed periodically by `setInterval` (every `AGGREGATION_INTERVAL_MS`).
+ * 1. Takes the accumulated scores and counts from the last interval.
+ * 2. Resets the accumulators (`currentIntervalScores`, `currentIntervalPostCount`).
+ * 3. Saves the aggregated data to the database.
+ * 4. Calculates the latest incremental moving averages using `liveMAState`.
+ * 5. Adds the new data point (with MAs) to the `recentHistoryBuffer` and prunes the buffer.
+ * 6. Prepares a `LiveUpdateMessage` payload with the latest data (including MAs) for active languages.
+ * 7. Broadcasts the live update message to all connected WebSocket clients.
+ * @async
+ */
 async function aggregateAndStore(): Promise<void> {
     const now = Date.now();
     const timestamp = new Date(now);
@@ -665,6 +782,7 @@ async function aggregateAndStore(): Promise<void> {
     }
 
     // --- Broadcasting Logic ---
+    // Send live updates only if there are connected clients and data was processed.
     if (liveUpdatePayload.length > 0 && wss.clients.size > 0) {
         const message: LiveUpdateMessage = {
             type: 'liveUpdate',
@@ -676,7 +794,14 @@ async function aggregateAndStore(): Promise<void> {
     }
 }
 
-// --- Main Application ---
+// --- Main Application Entry Point ---
+
+/**
+ * The main function to start the application.
+ * Initializes the database, starts the periodic aggregation timer (`aggregateAndStore`),
+ * connects to the Bluesky Firehose, and starts the HTTP/WebSocket server.
+ * @async
+ */
 async function main() {
     console.log('Starting Bluesky Sentiment Analysis Service...');
 
@@ -695,13 +820,14 @@ async function main() {
     // Log throttling factor (even if 1)
     console.log(`Processing 1 / ${THROTTLE_FACTOR} posts from firehose.`);
 
-    // Start firehose non-blocking
+    // Start firehose subscription non-blocking, allowing the server to start listening.
+    // Pass `processPost` as the callback for handling individual posts.
     firehose.subscribeToFirehose(processPost).catch((error: any) => {
         console.error('Firehose subscription failed critically:', error);
         // Consider reconnect logic here
     });
 
-    // Start HTTP/WebSocket server
+    // Start the HTTP server and listen for connections.
     server.on('error', (error: NodeJS.ErrnoException) => {
         console.error(`Server listening error: ${error.code} - ${error.message}`);
         process.exit(1);
@@ -714,5 +840,5 @@ async function main() {
     });
 }
 
-// Run the main function
+// Run the main application function.
 main();

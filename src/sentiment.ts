@@ -6,6 +6,15 @@ import franc from 'franc-all';
 import natural from 'natural';
 
 /**
+ * @fileoverview
+ * This module handles the sentiment analysis of text using the NRC Emotion Lexicon.
+ * It supports multiple languages by loading a consolidated lexicon file and
+ * utilizing language-specific stemmers where available via the 'natural' library.
+ * The primary function `analyzeSentiment` takes text and a language code to
+ * return sentiment scores.
+ */
+
+/**
  * Represents the NRC Emotion Lexicon data structure for a single language
  */
 interface NrcLexicon {
@@ -37,9 +46,18 @@ const LEXICON_FILE_PATH = path.join(__dirname, '..', 'data', 'NRC-Emotion-Lexico
 
 /**
  * Loads and parses the consolidated NRC Emotion Lexicon file.
+ * This function reads the specified lexicon file, parses its header to identify
+ * supported languages and their corresponding columns, and then processes each line
+ * to associate words (English and translations) with their respective emotion/sentiment tags.
+ * It handles potential file reading errors and logs progress and warnings.
+ * Lexicons for languages present in the header but having no associated words in the file
+ * are automatically cleaned up (removed from the final map).
  *
- * @returns A Map where keys are language names (lowercase, e.g., "english", "spanish")
- *          and values are NrcLexicon objects for that language.
+ * @returns {Map<string, NrcLexicon>} A Map where keys are lowercase language names
+ *          (e.g., "english", "spanish", matching the lexicon file headers)
+ *          and values are {@link NrcLexicon} objects for that language.
+ * @throws {Error} If the lexicon file cannot be read or is fundamentally malformed (e.g., missing header).
+ *         In such cases, the error is logged, and the process exits.
  */
 function loadConsolidatedNrcLexicon(): Map<string, NrcLexicon> {
     console.log(`Loading Consolidated NRC Lexicon from: ${LEXICON_FILE_PATH}`);
@@ -163,8 +181,15 @@ function loadConsolidatedNrcLexicon(): Map<string, NrcLexicon> {
 const nrcLexiconsByLanguage: Map<string, NrcLexicon> = loadConsolidatedNrcLexicon();
 
 // --- Language Filtering & Mapping ---
-// Keep only the top ~20 languages based on usage and stemming availability.
-// Keys MUST match franc output, values MUST match lexicon header names (lowercase).
+
+/**
+ * Defines the subset of languages targeted for analysis.
+ * Keys are ISO 639-3 language codes (as returned by 'franc').
+ * Values are the corresponding lowercase language names used as keys in the
+ * `nrcLexiconsByLanguage` map (derived from the lexicon file header).
+ * This mapping allows translating detected language codes to the lexicon keys.
+ * Only languages present in this map will be processed by `analyzeSentiment`.
+ */
 const TARGET_LANGUAGES: { [key: string]: string } = {
     // Languages with Stemmers in 'natural'
     'eng': 'english',
@@ -173,8 +198,7 @@ const TARGET_LANGUAGES: { [key: string]: string } = {
     'ita': 'italian',
     'nld': 'dutch',
     'por': 'portuguese',
-    'swe': 'swedish',
-    'nob': 'norwegian', // Using Bokmål for Norwegian
+
     'rus': 'russian',
     // Other High-Usage Languages (Unstemmed)
     'deu': 'german',
@@ -183,15 +207,19 @@ const TARGET_LANGUAGES: { [key: string]: string } = {
     'ara': 'arabic',
     'pol': 'polish',
     'tur': 'turkish',
-    'vie': 'vietnamese',
+
     'kor': 'korean',
-    'ind': 'indonesian',
+
     'hin': 'hindi',
-    'ben': 'bengali'
+
     // Total: 20 languages
 };
 
 // Filtered map for analysis
+/**
+ * @deprecated Prefer using TARGET_LANGUAGES directly for clarity.
+ * Alias for {@link TARGET_LANGUAGES}. Maps ISO 639-3 codes to NRC lexicon language names.
+ */
 const francToNrcMap: { [key: string]: string } = TARGET_LANGUAGES;
 
 // --- Stemmer Setup ---
@@ -224,10 +252,16 @@ console.log(`Initialized stemmers for ${stemmersByLanguage.size} languages out o
 
 /**
  * Analyzes the sentiment of a given text based on the loaded NRC Emotion Lexicon for the specified language.
+ * It tokenizes the text, optionally stems the tokens using the 'natural' library if a stemmer
+ * is available for the language, and aggregates the sentiment scores based on matching words
+ * in the language-specific lexicon.
  *
- * @param text The input text string.
- * @param langCode The language code (ISO 639-3 from franc).
- * @returns An object containing sentiment scores, or null if the language is unsupported.
+ * @param {string} text The input text string to analyze.
+ * @param {string} langCode The detected language code of the text (ISO 639-3 format, e.g., 'eng', 'fra').
+ *                          This code must be a key in {@link TARGET_LANGUAGES}.
+ * @returns {SentimentScores | null} A {@link SentimentScores} object containing the counts for each
+ *          emotion/sentiment category, or `null` if the `langCode` is not in {@link TARGET_LANGUAGES}
+ *          or if the corresponding lexicon could not be loaded. Returns a zero-score object if the text is empty.
  */
 export function analyzeSentiment(text: string, langCode: string): SentimentScores | null {
     const nrcLanguageName = francToNrcMap[langCode];
