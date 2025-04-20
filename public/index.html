@@ -61,8 +61,8 @@
     <header>
         <h1>Bluesky Sentiment <span class="info-icon">?<span class="tooltip-text">Sentiment Scores are averaged across posts within the server's aggregation interval (currently 10 seconds). Moving averages smooth these scores over longer periods.</span></span></h1>
         <div class="controls-right">
-             <label for="timeWindowSelect">Time Window:</label>
-            <select id="timeWindowSelect">
+             <label for="timeWindowSelector">Time Window:</label>
+            <select id="timeWindowSelector">
                 <option value="0.25">15 min</option>
                 <option value="1">1 hour</option>
                 <option value="2">2 hours</option>
@@ -76,34 +76,38 @@
     </header>
 
     <main>
+        <div id="loadingIndicator" style="display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(255,255,255,0.8); padding: 20px; border-radius: 5px; box-shadow: 0 0 10px rgba(0,0,0,0.2); z-index: 1001;">
+             Loading data...
+         </div>
+
         <div class="controls">
             <div>
                 <button id="addSignalBtn">+ Add Signal</button>
             </div>
              <div id="plottedSignalsList">
-                 <!-- Plotted signals will be listed here by app.ts -->
                  <p>No signals added yet.</p>
              </div>
+             <div id="languageCheckboxes" style="display: none;"></div>
         </div>
 
         <!-- Signal Selector Modal -->
         <div id="signalSelector">
             <h3>Configure Signal</h3>
             <div>
+                 <label for="availableSignalsList">Signal:</label>
+                 <div id="availableSignalsList">
+                     <p>Loading signals...</p>
+                 </div>
+            </div>
+            <div>
                 <label for="langSelect">Language:</label>
                 <select id="langSelect">
                     <!-- Options populated by app.ts -->
                 </select>
             </div>
-            <div>
-                <label for="metricSelect">Metric:</label>
-                <select id="metricSelect">
-                    <!-- Options populated by app.ts -->
-                </select>
-            </div>
              <div>
                  <label for="signalColor">Color:</label>
-                 <input type="color" id="signalColor"> <!-- REMOVED default value attribute -->
+                 <input type="color" id="signalColor">
              </div>
             <div class="checkbox-group">
                 Show:
@@ -136,6 +140,6 @@
     </footer>
 
     <!-- Load bundled JS -->
-    <script src="dist/app.js" type="module"></script>
+    <script src="dist/app.js" type="module" defer></script>
 </body>
 </html> 

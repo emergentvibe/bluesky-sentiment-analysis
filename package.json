@@ -10,7 +10,9 @@
     "build": "npm run clean && npm run build:backend && npm run build:frontend",
     "start": "node dist/server.js",
     "dev": "npm run build && npm start",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "ingest-lexicon": "tsx scripts/ingest_lexicon.ts",
+    "manage-lexicon": "tsx scripts/manage_lexicon.ts"
   },
   "keywords": [],
   "author": "",
@@ -22,15 +24,18 @@
     "@types/node": "^22.14.1",
     "@types/ws": "^8.18.1",
     "esbuild": "^0.25.2",
+    "tsx": "^4.19.3",
     "typescript": "^5.8.3"
   },
   "dependencies": {
     "@atproto/api": "^0.15.0",
     "@atproto/repo": "^0.8.0",
     "@atproto/xrpc-server": "^0.7.15",
+    "@types/commander": "^2.12.5",
     "@types/pg": "^8.11.13",
     "chart.js": "^4.4.9",
     "chartjs-adapter-moment": "^1.0.1",
+    "commander": "^13.1.0",
     "dotenv": "^16.5.0",
     "franc": "^6.2.0",
     "mime-types": "^3.0.1",

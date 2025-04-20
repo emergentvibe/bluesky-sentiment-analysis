@@ -1,195 +1,44 @@
-import fs from 'fs';
+import 'dotenv/config'; // Ensure env vars are loaded
 import path from 'path';
 import { fileURLToPath } from 'url';
 import franc from 'franc-all';
-// Import natural using default import for CommonJS compatibility
 import natural from 'natural';
+import pg from 'pg'; // Import pg
+const { Pool } = pg;
+import { SentimentScores } from './types.js'; // Assuming types.ts exists now
 
 /**
  * @fileoverview
- * This module handles the sentiment analysis of text using the NRC Emotion Lexicon.
- * It supports multiple languages by loading a consolidated lexicon file and
- * utilizing language-specific stemmers where available via the 'natural' library.
+ * This module handles the sentiment analysis of text using lexicon data stored in a database.
+ * It supports multiple languages and utilizes language-specific stemmers where available.
  * The primary function `analyzeSentiment` takes text and a language code to
- * return sentiment scores.
+ * return sentiment scores based on database lookups.
  */
 
-/**
- * Represents the NRC Emotion Lexicon data structure for a single language
- */
-interface NrcLexicon {
-    [word: string]: string[]; // word -> [emotion1, emotion2, ...]
+// --- Database Connection ---
+// Create a dedicated pool for this module, reads DATABASE_URL from .env
+if (!process.env.DATABASE_URL) {
+    // This check might be redundant if server.ts already checks, but good practice
+    console.error('CRITICAL (sentiment.ts): DATABASE_URL environment variable is not set.');
+    process.exit(1);
 }
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+
+// --- Dynamic Emotion Loading ---
 
 /**
- * Represents the count of each emotion and overall sentiment found in a text.
+ * Represents the count of each emotion/sentiment found in a text.
+ * Uses Record<string, number> to allow for dynamic emotions loaded from the DB.
  */
-export interface SentimentScores {
-    anger: number;
-    anticipation: number;
-    disgust: number;
-    fear: number;
-    joy: number;
-    sadness: number;
-    surprise: number;
-    trust: number;
-    positive: number;
-    negative: number;
-}
 
 // Replicate __dirname behavior in ESM
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Path to the consolidated lexicon file
-const LEXICON_FILE_PATH = path.join(__dirname, '..', 'data', 'NRC-Emotion-Lexicon', 'NRC-Emotion-Lexicon-ForVariousLanguages.txt');
+// --- Language Filtering & Mapping (Kept for Stemmer Association) ---
 
-/**
- * Loads and parses the consolidated NRC Emotion Lexicon file.
- * This function reads the specified lexicon file, parses its header to identify
- * supported languages and their corresponding columns, and then processes each line
- * to associate words (English and translations) with their respective emotion/sentiment tags.
- * It handles potential file reading errors and logs progress and warnings.
- * Lexicons for languages present in the header but having no associated words in the file
- * are automatically cleaned up (removed from the final map).
- *
- * @returns {Map<string, NrcLexicon>} A Map where keys are lowercase language names
- *          (e.g., "english", "spanish", matching the lexicon file headers)
- *          and values are {@link NrcLexicon} objects for that language.
- * @throws {Error} If the lexicon file cannot be read or is fundamentally malformed (e.g., missing header).
- *         In such cases, the error is logged, and the process exits.
- */
-function loadConsolidatedNrcLexicon(): Map<string, NrcLexicon> {
-    console.log(`Loading Consolidated NRC Lexicon from: ${LEXICON_FILE_PATH}`);
-    const lexiconsByLanguage = new Map<string, NrcLexicon>();
-    let loadedLanguageCount = 0;
-
-    let fileContent: string;
-    try {
-        fileContent = fs.readFileSync(LEXICON_FILE_PATH, 'utf-8');
-    } catch (error: any) {
-        console.error(`Error reading lexicon file ${LEXICON_FILE_PATH}: ${error.message}`);
-        console.error("Please ensure 'NRC-Emotion-Lexicon-ForVariousLanguages.txt' is in the 'data/NRC-Emotion-Lexicon' directory.");
-        // Exit if the main lexicon file can't be loaded
-        process.exit(1);
-    }
-
-    const lines = fileContent.split(/\r?\n/);
-    if (lines.length < 2) {
-        console.error("Lexicon file has too few lines (missing header or data).");
-        process.exit(1);
-    }
-
-    // Parse header to find language columns
-    const headers = lines[0].trim().split('\t');
-    const languageColumns: { name: string; index: number }[] = [];
-    // Assuming English word is index 0, emotions/sentiments are 1-10
-    const emotionHeaders = headers.slice(1, 11);
-
-    // *** ADD: Initialize English lexicon explicitly ***
-    lexiconsByLanguage.set('english', {});
-    console.log("Explicitly initialized 'english' lexicon map.");
-
-    // console.log("Parsing Lexicon Header:"); // REMOVE Log
-    for (let i = 11; i < headers.length; i++) { // Start after the 11 fixed columns
-        const headerName = headers[i]; // Get original header
-        const langName = headerName.toLowerCase();
-        // if (langName === 'english') { // REMOVE Log
-        //    console.log(` -> Found potential English column: Header='${headerName}', Index=${i}`);
-        // }
-        languageColumns.push({ name: langName, index: i });
-        lexiconsByLanguage.set(langName, {}); // Initialize lexicon for each language
-        loadedLanguageCount++;
-    }
-    console.log(`Identified ${loadedLanguageCount} languages in lexicon header (excluding English column 0).`);
-
-    // Process data lines
-    for (let i = 1; i < lines.length; i++) {
-        const line = lines[i];
-        const trimmedLine = line.trim();
-        if (!trimmedLine) continue;
-
-        const parts = trimmedLine.split('\t');
-        if (parts.length < headers.length) continue; // Skip lines shorter than header
-
-        // Get emotions associated with the English word
-        const emotions: string[] = [];
-        for (let j = 1; j < 11; j++) { // Indices 1 to 10 are emotions/sentiments
-            if (parts[j] === '1') {
-                emotions.push(headers[j]); // Use header name (e.g., 'anger')
-            }
-        }
-
-        if (emotions.length === 0) continue; // Skip if English word has no associations
-
-        // *** ADD: Populate English Lexicon using column 0 ***
-        const englishWord = parts[0]?.toLowerCase();
-        if (englishWord) {
-            const englishLexicon = lexiconsByLanguage.get('english')!;
-            if (!englishLexicon[englishWord]) {
-                englishLexicon[englishWord] = [];
-            }
-            // Add emotions if not already present for this English word
-            for (const emotion of emotions) {
-                if (!englishLexicon[englishWord].includes(emotion)) {
-                    englishLexicon[englishWord].push(emotion);
-                }
-            }
-        }
-
-        // Add associations for each language translation (Columns 11+)
-        for (const langInfo of languageColumns) {
-            const translatedWord = parts[langInfo.index]?.toLowerCase();
-            if (translatedWord && translatedWord !== '--' && translatedWord !== '') { // Check for valid translation
-                const langLexicon = lexiconsByLanguage.get(langInfo.name)!;
-                if (!langLexicon[translatedWord]) {
-                    langLexicon[translatedWord] = [];
-                }
-                // Add emotions if not already present for this translated word
-                for (const emotion of emotions) {
-                    if (!langLexicon[translatedWord].includes(emotion)) {
-                        langLexicon[translatedWord].push(emotion);
-                    }
-                }
-            }
-        }
-    }
-
-    // console.log("Finished processing lexicon lines."); // REMOVE Log
-    // console.log("Lexicon keys BEFORE cleanup:", Array.from(lexiconsByLanguage.keys())); // REMOVE Log
-    // console.log("Checking for 'english' key BEFORE cleanup:", lexiconsByLanguage.has('english')); // REMOVE Log
-
-    // Clean up empty language lexicons if any were created but had no valid words
-    for (const [lang, lexicon] of lexiconsByLanguage.entries()) {
-        if (Object.keys(lexicon).length === 0) {
-            // if (lang === 'english') { // REMOVE Log
-            //     console.warn(" -> WARNING: Deleting 'english' lexicon during cleanup because it was empty!");
-            // }
-            lexiconsByLanguage.delete(lang);
-            // console.warn(`Removed empty lexicon for language: ${lang}`); // Keep this muted unless debugging needed
-        }
-    }
-
-    if (lexiconsByLanguage.size === 0) {
-        console.error("CRITICAL: No language lexicons were successfully populated. Sentiment analysis will not work.");
-        // Consider exiting: process.exit(1);
-    }
-    return lexiconsByLanguage;
-}
-
-// Store all loaded lexicons
-const nrcLexiconsByLanguage: Map<string, NrcLexicon> = loadConsolidatedNrcLexicon();
-
-// --- Language Filtering & Mapping ---
-
-/**
- * Defines the subset of languages targeted for analysis.
- * Keys are ISO 639-3 language codes (as returned by 'franc').
- * Values are the corresponding lowercase language names used as keys in the
- * `nrcLexiconsByLanguage` map (derived from the lexicon file header).
- * This mapping allows translating detected language codes to the lexicon keys.
- * Only languages present in this map will be processed by `analyzeSentiment`.
- */
+// Maps ISO 639-3 codes (from franc) to language codes used in DB (from NRC header)
+// This also implicitly defines which languages will be processed.
 const TARGET_LANGUAGES: { [key: string]: string } = {
     // Languages with Stemmers in 'natural'
     'eng': 'english',
@@ -198,36 +47,29 @@ const TARGET_LANGUAGES: { [key: string]: string } = {
     'ita': 'italian',
     'nld': 'dutch',
     'por': 'portuguese',
-
+    'swe': 'swedish',
+    'nob': 'norwegian', // Using Bokmål for Norwegian
     'rus': 'russian',
-    // Other High-Usage Languages (Unstemmed)
+    // Other High-Usage Languages (Unstemmed) from original NRC file
     'deu': 'german',
-    'cmn': 'chinese_simplified', // Verify header name!
+    'cmn': 'chinese_simplified',
     'jpn': 'japanese',
     'ara': 'arabic',
     'pol': 'polish',
     'tur': 'turkish',
-
+    'vie': 'vietnamese',
     'kor': 'korean',
-
+    'ind': 'indonesian',
     'hin': 'hindi',
-
-    // Total: 20 languages
+    'ben': 'bengali'
+    // Note: Languages need to exist in lexicon_languages table (from ingestion script)
 };
 
-// Filtered map for analysis
-/**
- * @deprecated Prefer using TARGET_LANGUAGES directly for clarity.
- * Alias for {@link TARGET_LANGUAGES}. Maps ISO 639-3 codes to NRC lexicon language names.
- */
+// Map ISO 639-3 codes to NRC lexicon language names.
 const francToNrcMap: { [key: string]: string } = TARGET_LANGUAGES;
 
-// --- Stemmer Setup ---
-// Create a map from lowercase language name to the stemmer instance
-// Use 'any' for the stemmer type for simplicity with default import
+// --- Stemmer Setup (Remains the same) ---
 const stemmersByLanguage = new Map<string, any>();
-
-// Access stemmers via the default import object
 const languagesWithStemmers: { [key: string]: any } = {
     'english': natural.PorterStemmer,
     'french': natural.PorterStemmerFr,
@@ -240,86 +82,143 @@ const languagesWithStemmers: { [key: string]: any } = {
     'russian': natural.PorterStemmerRu
 };
 
-console.log("Attempting to initialize stemmers...");
-
-for (const nrcName of Object.values(francToNrcMap)) { // Iterate over TARGET_LANGUAGES map
+// Initialize stemmers based on TARGET_LANGUAGES
+console.log("Initializing stemmers for target languages...");
+for (const nrcName of Object.values(francToNrcMap)) {
     const stemmerClass = languagesWithStemmers[nrcName];
     if (stemmerClass) {
         stemmersByLanguage.set(nrcName, stemmerClass);
+        // console.log(` - Initialized stemmer for: ${nrcName}`);
     }
 }
-console.log(`Initialized stemmers for ${stemmersByLanguage.size} languages out of ${Object.keys(francToNrcMap).length} target languages.`);
+console.log(`Initialized stemmers for ${stemmersByLanguage.size} languages.`);
 
 /**
- * Analyzes the sentiment of a given text based on the loaded NRC Emotion Lexicon for the specified language.
- * It tokenizes the text, optionally stems the tokens using the 'natural' library if a stemmer
- * is available for the language, and aggregates the sentiment scores based on matching words
- * in the language-specific lexicon.
+ * Helper function to create an empty SentimentScores object conforming to the interface from types.ts.
+ * @returns {SentimentScores} An empty scores object.
+ */
+export function createEmptyScores(): SentimentScores {
+    // Ensure this matches the SentimentScores interface in types.ts
+    return {
+        anger: 0,
+        anticipation: 0,
+        disgust: 0,
+        fear: 0,
+        joy: 0,
+        sadness: 0,
+        surprise: 0,
+        trust: 0,
+        positive: 0,
+        negative: 0
+        // No need for [key: string]: number here if types.ts handles it
+    };
+}
+
+/**
+ * Analyzes the sentiment of a given text based on lexicon data stored in the database.
+ * It tokenizes the text, optionally stems tokens, queries the database for word-emotion associations,
+ * and aggregates the sentiment scores dynamically based on emotions found in the DB.
  *
  * @param {string} text The input text string to analyze.
  * @param {string} langCode The detected language code of the text (ISO 639-3 format, e.g., 'eng', 'fra').
- *                          This code must be a key in {@link TARGET_LANGUAGES}.
- * @returns {SentimentScores | null} A {@link SentimentScores} object containing the counts for each
- *          emotion/sentiment category, or `null` if the `langCode` is not in {@link TARGET_LANGUAGES}
- *          or if the corresponding lexicon could not be loaded. Returns a zero-score object if the text is empty.
+ *                          Must be a key in `TARGET_LANGUAGES`.
+ * @returns {Promise<SentimentScores | null>} A Promise resolving to a `SentimentScores` object (Record<string, number>)
+ *          containing counts for each dynamically loaded emotion/sentiment, or `null` if the language is not targeted.
+ *          Returns a zero-score object if the text is empty or no associations are found.
+ *          Returns null if a database error occurs during lookup.
  */
-export function analyzeSentiment(text: string, langCode: string): SentimentScores | null {
-    const nrcLanguageName = francToNrcMap[langCode];
-    if (!nrcLanguageName) {
-        return null; // Language not mapped
+export async function analyzeSentiment(text: string, langCode: string): Promise<SentimentScores | null> {
+    const nrcLanguageCode = francToNrcMap[langCode]; // Map franc code to DB/NRC language code
+    if (!nrcLanguageCode) {
+        return null; // Language not mapped/targeted
     }
 
-    const lexicon = nrcLexiconsByLanguage.get(nrcLanguageName);
-    if (!lexicon) {
-        if (langCode === 'eng') {
-            console.warn("analyzeSentiment (eng): No lexicon found for 'english'. This shouldn't happen.");
-        }
-        return null; // Lexicon for the mapped language wasn't loaded/doesn't exist
-    }
-
-    // Get the appropriate stemmer for the language, if available
-    const stemmer = stemmersByLanguage.get(nrcLanguageName);
-
-    const scores: SentimentScores = {
-        anger: 0, anticipation: 0, disgust: 0, fear: 0,
-        joy: 0, sadness: 0, surprise: 0, trust: 0,
-        positive: 0, negative: 0,
-    };
+    // Use the exported helper which returns the correct SentimentScores type
+    const scores: SentimentScores = createEmptyScores();
 
     if (!text) {
-        return scores;
+        return scores; // Return zero scores for empty text
     }
 
-    const tokens = text.toLowerCase().split(/\W+/).filter(Boolean); // Split on non-word characters and remove empty strings
+    // Get the appropriate stemmer, if available
+    const stemmer = stemmersByLanguage.get(nrcLanguageCode);
+    const tokens = text.toLowerCase().split(/\W+/).filter(Boolean);
 
-    for (const token of tokens) {
-        let lookupToken = token;
+    // --- Database Query Logic ---
+    // PERFORMANCE NOTE: This approach queries the DB for each token.
+    // For high throughput, consider batching token lookups per post.
+    let client: pg.PoolClient | null = null; // Declare client outside the loop
+    try {
+         client = await pool.connect(); // Get a client from the pool
 
-        // Stem the token IF a stemmer exists for this language
-        if (stemmer) {
-            try {
-                // Use the static stem method
-                lookupToken = stemmer.stem(token);
-            } catch (e) {
-                // Handle potential errors from stemming (e.g., unusual input)
-                console.warn(`Stemmer error for token "${token}" in language "${nrcLanguageName}":`, e);
-                lookupToken = token; // Fallback to original token
+        for (const token of tokens) {
+            let lookupToken = token;
+
+            // Stem the token IF a stemmer exists for this language
+            if (stemmer) {
+                try {
+                    lookupToken = stemmer.stem(token);
+                } catch (e) {
+                    console.warn(`Stemmer error for token "${token}" in language "${nrcLanguageCode}":`, e);
+                    lookupToken = token; // Fallback to original token
+                }
             }
-        }
 
-        // Use the potentially stemmed token for lookup
-        if (lookupToken && lexicon[lookupToken]) {
-            const emotions = lexicon[lookupToken];
-            for (const emotion of emotions) {
-                if (emotion in scores) {
-                    scores[emotion as keyof SentimentScores]++;
+            if (!lookupToken) continue; // Skip if token becomes empty after processing
+
+            // 1. Find word_id for the token and language
+            const wordResult = await client.query(
+                'SELECT word_id FROM lexicon_words WHERE word_text = $1 AND language_code = $2',
+                [lookupToken, nrcLanguageCode]
+            );
+            const wordId = wordResult.rows[0]?.word_id;
+
+            if (wordId) {
+                // 2. If word found, find associated emotion names
+                const emotionResult = await client.query(
+                   `SELECT le.emotion_name
+                    FROM word_emotion_associations wea
+                    JOIN lexicon_emotions le ON wea.emotion_id = le.emotion_id
+                    WHERE wea.word_id = $1`,
+                   [wordId]
+                );
+
+                // 3. Increment scores for found emotions
+                for (const row of emotionResult.rows) {
+                    const emotionName = row.emotion_name;
+                    // Check against the keys defined in the SentimentScores interface
+                    if (scores.hasOwnProperty(emotionName)) {
+                        scores[emotionName]++;
+                    } else {
+                         console.warn(`DB returned emotion '${emotionName}' not defined in SentimentScores interface.`);
+                    }
                 }
             }
         }
-    }
+        // Return the populated scores object
+        return scores;
 
-    return scores;
+    } catch (error: any) {
+        console.error(`Database error during sentiment analysis for text starting with "${text.substring(0, 30)}..." (lang: ${langCode}):`, error.message);
+        return null; // Indicate failure with null
+    } finally {
+        client?.release(); // Release the client back to the pool if it was acquired
+    }
 }
 
-// Example Usage (remains similar, but language code is now needed)
-// const scores1 = analyzeSentiment("I am so happy", 'eng'); 
+// Note: loadDynamicEmotionsFromDB() needs to be called during application startup.
+// Example of how it might be called in server.ts:
+/*
+async function main() {
+    console.log('Starting Bluesky Sentiment Analysis Service...');
+
+    // Initialize Database FIRST (includes creating tables)
+    await initializeDatabase();
+
+    // Load dynamic emotions *after* DB init
+    await loadDynamicEmotionsFromDB();
+
+    // Start the aggregation timer
+    // ... rest of main ...
+}
+*/

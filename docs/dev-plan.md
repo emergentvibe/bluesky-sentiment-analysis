@@ -244,17 +244,18 @@ This document outlines the plan to build a real-time dashboard that monitors Blu
             *   For `volumeChart`, create/update one dataset per unique language present in `plottedSignals`. Apply stacking and sorting (`sortVolumeDatasets`).
     *   **14.6: Backend - No Changes Needed (for MVP):** Existing backend functionality supports fetching required data.
 
-15. **Lexicon Management, Dynamic Sentiment, & Advanced Filtering (⚪ To Do):**
+15. **Lexicon Management, Dynamic Sentiment, & Advanced Filtering (⚪ To Do -> ✅ Completed):**
     *   **Goal:** Integrate lexicon management directly into the application using a database, allow sentiment analysis to use custom/dynamic emotions, enable complex boolean keyword filtering, and refactor the backend API for better signal handling.
+    *   **Progress Summary:** Database schema for lexicon storage created and implemented. Initial data ingestion script created and runnable. Admin script for lexicon management created. Sentiment analysis core logic refactored to use DB lookups and handle dynamic emotions fetched at startup. Server helper functions updated for dynamic score structures. Backend API endpoint `/api/metrics` implemented to serve dynamic metrics. Frontend updated to fetch metrics dynamically and populate UI controls. Complex filter DB schema created. Admin script `manage_filters.ts` created. Backend logic implemented to load active filters, evaluate posts against them (simple keyword matching), and aggregate/store filtered sentiment data separately. **Filter Integration:** Backend API, data fetching, MA calc, and live updates adapted for combined signals. Frontend UI selector updated. Frontend history/live update handlers adapted for combined signals.
     *   **Sub-tasks:**
-        *   **15.1: Design & Implement Lexicon DB Schema (⚪ To Do):**
+        *   **15.1: Design & Implement Lexicon DB Schema (✅ Completed):**
             *   Define and create PostgreSQL tables (using `initializeDatabase` or a migration tool if adopted later):
                 *   `lexicon_emotions` (emotion_id PK, emotion_name UNIQUE, is_base_nrc BOOLEAN)
                 *   `lexicon_languages` (language_code PK UNIQUE, language_name) - Use lowercase NRC header names for code.
                 *   `lexicon_words` (word_id PK, word_text, language_code FK, UNIQUE(word_text, language_code))
                 *   `word_emotion_associations` (association_id PK, word_id FK, emotion_id FK, UNIQUE(word_id, emotion_id))
             *   **Add Indexes:** Ensure appropriate indexes are created on foreign keys and columns used in frequent lookups (e.g., `lexicon_words(word_text, language_code)`, `word_emotion_associations(word_id)`).
-        *   **15.2: Implement Lexicon Ingestion Script (TypeScript) (⚪ To Do):**
+        *   **15.2: Implement Lexicon Ingestion Script (TypeScript) (✅ Completed):**
             *   Create a standalone TypeScript script (`scripts/ingest_lexicon.ts`).
             *   Requires DB connection (`pg` client, reads `DATABASE_URL`).
             *   Reads `data/NRC-Emotion-Lexicon/NRC-Emotion-Lexicon-ForVariousLanguages.txt`.
@@ -262,7 +263,7 @@ This document outlines the plan to build a real-time dashboard that monitors Blu
             *   Populates the `lexicon_languages` and `lexicon_emotions` tables (setting `is_base_nrc=true`) using transactions.
             *   Iterates through data lines, populating `lexicon_words` and `word_emotion_associations` tables using transactions for integrity.
             *   Include in `package.json` scripts (e.g., `npm run ingest-lexicon`).
-        *   **15.3: Implement Lexicon Management Script (Admin Only) (TypeScript) (⚪ To Do):**
+        *   **15.3: Implement Lexicon Management Script (Admin Only) (TypeScript) (✅ Completed):**
             *   Create a script (`scripts/manage_lexicon.ts`) for admin use (direct execution on the backend).
             *   Provides functions for:
                 *   `add_emotion(emotion_name)`: Adds a new row to `lexicon_emotions` (`is_base_nrc=false`).
@@ -270,7 +271,7 @@ This document outlines the plan to build a real-time dashboard that monitors Blu
                 *   `associate_word_emotion(word_text, language_code, emotion_name)`: Finds word/emotion IDs and creates an association in `word_emotion_associations`.
                 *   `disassociate_word_emotion(...)`: Removes an association.
             *   (Note: No user-facing UI or API for lexicon management in this phase).
-        *   **15.4: Refactor Sentiment Analysis for DB Lookups (`src/sentiment.ts`) (⚪ To Do):**
+        *   **15.4: Refactor Sentiment Analysis for DB Lookups (`src/sentiment.ts`) (✅ Completed):**
             *   Remove `loadConsolidatedNrcLexicon` function and file reading logic.
             *   Implement `loadDynamicEmotionsFromDB` (called at startup):
                 *   Connects to DB.
@@ -285,31 +286,37 @@ This document outlines the plan to build a real-time dashboard that monitors Blu
                     *   Populate a dynamic `scores: Record<string, number>` object (initialized using `currentEmotionKeys` from `loadDynamicEmotionsFromDB`) based on the returned emotion names.
                 *   **Performance Note:** This introduces DB lookups for each analyzed token. Assess performance impact. Consider optimizations like batching token lookups per post if needed.
             *   Potentially adjust `TARGET_LANGUAGES` map based on languages present in `lexicon_languages` table or keep as explicit filter.
-        *   **15.5: Refactor Server Logic for Dynamic Scores (`src/server.ts`) (⚪ To Do):**
+        *   **15.5: Refactor Server Logic for Dynamic Scores (`src/server.ts`) (✅ Completed):**
             *   Adapt `SentimentScores` usage (replace fixed interface with `Record<string, number>` or similar dynamic type) throughout the server logic (e.g., in `HistoryEntry`, `LiveUpdateEntry`, `WindowState`).
             *   Modify helper functions (`createEmptyScores`, `addScores`, `subtractScores`) to operate on the dynamic `Record<string, number>` structure, using the globally loaded `currentEmotionKeys` list.
             *   Ensure database storage/retrieval (`aggregateAndStore`, `getAggregatedData`) correctly handles the dynamic `scores` JSONB object.
             *   Ensure MA calculations (`calculateMAsForAggregatedData`, `updateIncrementalWindowState`) correctly handle the dynamic scores structure.
-        *   **15.6: Expose Available Metrics Dynamically (Backend) (⚪ To Do):**
-            *   Implement a simple, cached HTTP endpoint (e.g., `/api/metrics`) that queries `lexicon_emotions` and returns the list of available metrics (e.g., `[{ id: emotion_id, name: emotion_name }, ...]`) for the frontend.
-        *   **15.7: Update Frontend Dynamically (`public/app.ts`) (⚪ To Do):**
+        *   **15.6: Expose Available Metrics Dynamically (Backend) (✅ Completed):**
+            *   Implement a simple, cached HTTP endpoint (`/api/metrics`) that queries `lexicon_emotions` and returns the list of available metrics (e.g., `[{ id: emotion_id, name: emotion_name }, ...]`) for the frontend.
+        *   **15.7: Update Frontend Dynamically (`public/app.ts`) (✅ Completed):**
             *   Remove hardcoded `AVAILABLE_METRICS` constant.
             *   On initialization, fetch the list of available metrics from the `/api/metrics` endpoint.
             *   Populate the metric selector dropdown (`#metricSelect`) dynamically.
             *   Ensure frontend logic (`getMetricValue`, dataset generation) correctly references metric names based on the fetched list.
-        *   **15.8: Implement Complex Boolean Keyword Filters (Backend - Processing & Storage) (⚪ To Do):**
-            *   **DB Schema:** Define and implement a table for storing admin-defined global filters: `complex_keyword_filters` (filter_id PK, filter_name UNIQUE, filter_query TEXT, description TEXT NULL). Query uses a defined syntax (e.g., maps to PostgreSQL `tsquery` or a custom format).
-            *   **Admin Management:** Add functions to `scripts/manage_lexicon.ts` (or a new script) for admins to add/remove/update rows in `complex_keyword_filters`.
-            *   **Filtering Logic:** Modify `processPost` (or add a filtering step):
-                *   Load active filters from `complex_keyword_filters` at startup (or periodically).
-                *   For each post, evaluate its text against each active filter's `filter_query`.
-                *   **Library/Approach:** Investigate using PostgreSQL Full-Text Search (`tsquery` with `to_tsquery`, `ts_match_vq`) for efficient evaluation within the DB if possible. Alternatively, use a JS parsing library (`chevrotain`, `nearley`) or custom evaluation logic. Note performance impact.
-            *   **Aggregation:** Implement separate aggregation for posts matching *each* filter. Create a new table `complex_filter_sentiment_data` (timestamp, filter_id FK, language, scores JSONB, post_count). Modify `aggregateAndStore` to update this table alongside `sentiment_data`.
-        *   **15.9: Integrate Complex Filters into Signal Plotting (Frontend/Backend) (⚪ To Do):**
-            *   **Backend:** Extend `/api/metrics` (or create `/api/filters`) to also return the list of available global complex filters (e.g., `[{ id: filter_id, name: filter_name, type: 'filter' }, ...]`).
-            *   **Frontend:** Update the signal selection UI (`setupControls` in `public/app.ts`) to populate the metric/signal dropdown with both standard metrics and the available complex filters.
-            *   **Backend:** Adapt `getAggregatedData` and `calculateMAsForAggregatedData` to handle requests for `filter_id`s, querying `complex_filter_sentiment_data` instead of `sentiment_data` and returning results in the same `HistoryEntry` format.
-            *   **Frontend:** Adapt data request/handling (`requestHistoryData`, `handleHistoryData`, `handleLiveUpdate`) to request and display data for selected complex filter signals.
+        *   **15.8: Implement Complex Boolean Keyword Filters (Backend - Processing & Storage) (✅ Completed):**
+            *   **Goal:** Allow filtering the firehose stream based on admin-defined complex keyword queries.
+            *   **Sub-steps:**
+                *   **15.8.1: DB Schema (✅ Completed):** Define and implement tables `complex_keyword_filters` and `complex_filter_sentiment_data` in `initializeDatabase`.
+                *   **15.8.2: Admin Management Script (✅ Completed):** Create `scripts/manage_filters.ts` for admin CRUD operations on the `complex_keyword_filters` table.
+                *   **15.8.3: Filter Loading (✅ Completed):** Implement logic at server startup to load active filters (`is_active = TRUE`) into memory (`activeFilters`).
+                *   **15.8.4: Filter Evaluation Logic (✅ Completed):** Modify `processPost` to iterate through `activeFilters` and evaluate post text against `filter_query` (using simple space-separated keyword OR matching for now).
+                *   **15.8.5: Filtered Data Aggregation (✅ Completed):** Modify `aggregateAndStore` to introduce filter-specific accumulators and `INSERT` aggregated results into `complex_filter_sentiment_data`.
+        *   **15.9: Integrate Complex Filters into Signal Plotting (Frontend/Backend) (✅ Completed):**
+            *   **Goal:** Allow users to select and plot data aggregated by complex filters alongside standard metrics.
+            *   **Progress Summary:** Backend API (`/api/metrics`) updated to return combined list of metrics and active filters. Frontend UI (`metricSelect`) updated to fetch and display combined signals. Backend data retrieval (`getAggregatedData`) updated to fetch from both `sentiment_data` and `complex_filter_sentiment_data` based on signal type. Backend MA calculation (`calculateMAsForAggregatedData`) updated to handle the combined data map. Live update (`aggregateAndStore`) updated to include filter data and signal names.
+            *   **Sub-steps:**
+                *   **15.9.1: Backend - Expose Filters via API (✅ Completed):** Extended `/api/metrics` to return active filters alongside metrics, each with a `type` identifier.
+                *   **15.9.2: Frontend - Update Signal Selector (✅ Completed):** Modified `public/app.ts` (`fetchAvailableSignals`, `setupControls`) to fetch combined signals and populate the UI selector.
+                *   **15.9.3: Backend - Adapt Data Fetching & MA (✅ Completed):** Loaded `availableSignals` globally. Refactored `getAggregatedData` to query both tables based on signal type and return a map keyed by `signalName_languageCode`. Refactored `calculateMAsForAggregatedData` to process this map structure.
+                *   **15.9.4: Backend - Adapt Live Updates (✅ Completed):** Modified `aggregateAndStore` and `LiveUpdateEntry` to include `signalName` and process both metric and filter data for live updates.
+                *   **15.9.5: Backend - Fix History Response Format (✅ Completed):** Refactored WebSocket handler for `requestHistory` to send data keyed by `signalName_languageCode`.
+                *   **15.9.6: Frontend - Adapt History Handling (✅ Completed):** Modified `handleHistoryData` in `public/app.ts` to parse the new history response structure and update chart datasets using `signalName` and `languageCode`.
+                *   **15.9.7: Frontend - Adapt Live Update Handling (✅ Completed):** Modified `handleLiveUpdate` in `public/app.ts` to use `signalName` from the payload to correctly route updates.
         *   **15.10: Backend API Refactor & Signal Composition Layer (⚪ To Do):**
             *   (As previously defined - This is a larger refactor, likely deferred until after the above dynamic features are stable. Focuses on request/response API, signal definitions, backend composition).
 

@@ -2,7 +2,7 @@ import { ComAtprotoSyncSubscribeRepos } from '@atproto/api';
 import { Subscription } from '@atproto/xrpc-server';
 import { cborToLexRecord, readCar } from '@atproto/repo';
 import { AppBskyFeedPost } from '@atproto/api';
-import { CommitData } from './server.js'; // Add .js extension
+import { CommitData } from './types.js'; // Import from types.ts
 
 /**
  * @fileoverview Manages the connection and subscription to the Bluesky Firehose
@@ -141,12 +141,14 @@ class FirehoseSubscription {
                                         // *** Schedule processing, don't await ***
                                         setImmediate(() => {
                                             try {
-                                                // Align with CommitData definition from server.ts (commit, ops, repo, time)
+                                                // Ensure the object passed matches the CommitData interface from types.ts
                                                 const callbackCommitData: CommitData = {
-                                                    commit: commit, // Pass the full commit object
-                                                    ops: commit.ops,   // Pass the operations array
+                                                    // Pass only fields defined in CommitData from types.ts
                                                     repo: commit.repo,
                                                     time: commit.time,
+                                                    // Remove fields not defined in CommitData if necessary
+                                                    // commit: commit, 
+                                                    // ops: commit.ops,
                                                 };
                                                 onPost(record as AppBskyFeedPost.Record, callbackCommitData);
                                             } catch (postProcessingError) {

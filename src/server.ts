@@ -1,18 +1,36 @@
 import 'dotenv/config'; // Load .env file variables
 
-import FirehoseSubscription from './firehose.js'; // Use default import
-import { AppBskyFeedPost } from '@atproto/api';
+// Corrected/Default Imports
+import FirehoseSubscription from './firehose.js'; // Import the CLASS
+import { AppBskyFeedPost } from '@atproto/api'; // Remove direct Commit import for now
 import { franc } from 'franc';
-import { analyzeSentiment, SentimentScores } from './sentiment.js';
+// @ts-ignore - Suppress incorrect "not exported" error
+import { analyzeSentiment, SentimentScores, createEmptyScores } from './sentiment.js';
 import { WebSocketServer, WebSocket } from 'ws';
 import http from 'http';
-import fs from 'fs'; // Import fs for file serving
-import path from 'path'; // Import path for file paths
-import mime from 'mime-types'; // Import mime-types for content type detection
-import pg from 'pg'; // Import pg
-import { QueryResult } from 'pg'; // Add QueryResult type import back
+import fs from 'fs';
+import path from 'path';
+import mime from 'mime-types';
+import pg, { PoolClient, QueryResult } from 'pg';
 const { Pool } = pg;
-import dotenv from 'dotenv';
+import { AggregatedScoreEntry, LiveUpdateEntry, MetricSignal, HistoryEntry, LiveUpdateMessage, RequestHistoryMessage, HistoryDataMessage, ClientMessage, CommitData, AvailableSignal, WindowState, RawDbEntry } from './types.js'; // Make sure SentimentScores is imported
+
+// Top-level state
+let dynamicSignals: MetricSignal[] = [];
+let currentIntervalScores: { [lang: string]: SentimentScores } = {}; // Re-add definition
+let currentIntervalPostCount: { [lang: string]: number } = {}; // Re-add definition
+let recentHistoryBuffer: { [lang: string]: HistoryEntry[] } = {}; // Re-add definition
+let liveMAState: { [lang: string]: { short: WindowState; long: WindowState } } = {}; // Re-add definition
+
+// Constants (Keep the first block, remove the second one later)
+const AGGREGATION_INTERVAL_MS = parseInt(process.env.AGGREGATION_INTERVAL_MS || '10000', 10); // 10 seconds default (adjust if needed)
+// Calculate window points based on MS constants
+const SHORT_AVG_WINDOW_POINTS = Math.max(1, Math.round(parseInt(process.env.SHORT_AVG_WINDOW_MS || (5 * 60 * 1000).toString(), 10) / AGGREGATION_INTERVAL_MS));
+const LONG_AVG_WINDOW_POINTS = Math.max(1, Math.round(parseInt(process.env.LONG_AVG_WINDOW_MS || (60 * 60 * 1000).toString(), 10) / AGGREGATION_INTERVAL_MS));
+
+const DEFAULT_METRIC_KEYS = ['Positive', 'Negative', 'Neutral', 'Anger', 'Disgust', 'Fear', 'Joy', 'Sadness', 'Surprise'];
+const LIVE_UPDATE_BUFFER_MS = parseInt(process.env.LONG_AVG_WINDOW_MS || (60 * 60 * 1000).toString(), 10) + (5 * 60 * 1000); // Buffer slightly larger than longest MA window
+
 
 // --- Database Setup ---
 // Validate that the DATABASE_URL environment variable is set.
@@ -31,120 +49,251 @@ const pool = new Pool({
     // }
 });
 
+pool.on('error', (err) => {
+    console.error('Unexpected error on idle client', err);
+    process.exit(-1);
+});
+
+// --- Database Functions ---
+
 /**
  * Initializes the PostgreSQL database.
- * Ensures the `sentiment_data` table exists with the correct schema.
- * Creates an index on the timestamp column for faster querying.
- * Exits the process if initialization fails.
+ * Ensures the necessary tables exist with the correct schema and indexes.
  * @async
  * @throws {Error} If database connection or query execution fails.
  */
 async function initializeDatabase() {
     console.log('Initializing database...');
+    const client: PoolClient = await pool.connect();
     try {
-        await pool.query(`
+        // Raw sentiment data table (10s intervals)
+        await client.query(`
             CREATE TABLE IF NOT EXISTS sentiment_data (
-                timestamp TIMESTAMPTZ NOT NULL, -- Changed to NOT NULL
-                language VARCHAR(10) NOT NULL, -- Added language column
+                timestamp TIMESTAMPTZ NOT NULL,
+                language VARCHAR(10) NOT NULL,
                 scores JSONB NOT NULL,
                 post_count INTEGER NOT NULL,
-                PRIMARY KEY (timestamp, language) -- Composite primary key
+                PRIMARY KEY (timestamp, language)
             );
         `);
-        console.log('Database table ensured.');
+        console.log('Table "sentiment_data" ensured.');
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_sentiment_data_timestamp ON sentiment_data (timestamp DESC);`);
+        console.log('Index "idx_sentiment_data_timestamp" ensured.');
 
-        // Optional: Create/Update index for faster time-based queries (timestamp is primary)
-        await pool.query(`
-            CREATE INDEX IF NOT EXISTS idx_sentiment_data_timestamp ON sentiment_data (timestamp DESC);
+        // Complex Keyword Filters Table (Task 15.8.1)
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS complex_keyword_filters (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(100) UNIQUE NOT NULL,
+                description TEXT,
+                keywords_json JSONB NOT NULL, -- Store keywords as JSON { "include": [...], "exclude": [...] }
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            );
         `);
-        console.log('Database index ensured.');
+        console.log('Table "complex_keyword_filters" ensured.');
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_complex_filters_active ON complex_keyword_filters (is_active);`);
+        console.log('Index "idx_complex_filters_active" ensured.');
+
 
     } catch (err: any) {
         console.error('Database initialization failed:', err.message || err);
-        process.exit(1); // Exit if DB init fails
+        process.exit(1);
+    } finally {
+        client.release();
     }
 }
 
-// Calculate absolute paths for serving static files.
+/**
+ * Loads active dynamic signals (complex keyword filters) from the database.
+ * @async
+ * @returns {Promise<MetricSignal[]>} A promise resolving to an array of active signals.
+ * @throws {Error} If database query fails.
+ */
+async function loadDynamicSignalsFromDB(): Promise<MetricSignal[]> {
+    console.log('Loading dynamic signals from database...');
+    const client: PoolClient = await pool.connect();
+    try {
+        const queryResult: QueryResult<MetricSignal> = await client.query(
+            `SELECT id, name, keywords_json, description, is_active
+             FROM complex_keyword_filters
+             WHERE is_active = TRUE
+             ORDER BY name ASC`
+        );
+        console.log(`Loaded ${queryResult.rowCount} active dynamic signals.`);
+        // Basic validation (example: check if keywords_json is valid JSON)
+        return queryResult.rows.map(row => {
+             // Define the type for MetricSignal based on the DB schema
+             const signal: MetricSignal = {
+                 id: row.id,
+                 name: row.name,
+                 keywords_json: row.keywords_json, // Assuming keywords_json is directly usable or parsed later
+                 description: row.description,
+                 is_active: row.is_active,
+                 type: 'filter' // Explicitly mark as filter type
+             };
+            try {
+                // Attempt to parse the JSON to ensure it's valid, handle if stored as string
+                 if (typeof signal.keywords_json === 'string') {
+                    JSON.parse(signal.keywords_json);
+                 } else if (typeof signal.keywords_json !== 'object' || signal.keywords_json === null) {
+                     throw new Error('keywords_json is not a valid object');
+                 }
+                 // You might add more specific validation based on expected structure { include: [], exclude: [] }
+                return signal;
+            } catch (e: any) {
+                console.error(`Invalid JSON in keywords_json for signal id ${signal.id} (${signal.name}): ${e.message}. Skipping.`);
+                return null; // Filter out invalid ones
+            }
+        }).filter((row): row is MetricSignal => row !== null); // Type guard to filter out nulls
+    } catch (err: any) {
+        console.error('Error loading dynamic signals from database:', err.message || err);
+        return []; // Return empty array on error
+    } finally {
+        client.release();
+    }
+}
+
+
+// --- Path Setup ---
+// Use process.cwd() for more reliable path resolution
 const PROJECT_ROOT = process.cwd();
 const PUBLIC_DIR = path.join(PROJECT_ROOT, 'public');
-const INDEX_HTML_PATH = path.join(PUBLIC_DIR, 'index.html');
 
-// --- HTTP and WebSocket Server Setup ---
-// Read port from environment or default to 3000.
-const PORT = parseInt(process.env.PORT || '3000');
+// --- HTTP Server ---
+// ... (existing HTTP server creation code - Ensure static file serving is correct) ...
+const server = http.createServer(async (req, res) => {
+    if (!req.url) {
+        res.writeHead(400, { 'Content-Type': 'text/plain' });
+        res.end('Bad Request: URL is missing');
+        return;
+    }
+    console.log(`HTTP Request: ${req.method} ${req.url}`); // Log request
 
-// Create an HTTP server to serve the static frontend files.
-const server = http.createServer((req, res) => {
-    console.log(`HTTP Request: ${req.method} ${req.url}`);
+    // --- API Endpoint Handling (BEFORE static files) ---
+    if (req.url.startsWith('/api/')) {
+        if (req.url === '/api/metrics' && req.method === 'GET') {
+            try {
+                // Use the globally updated dynamicSignals
+                const allMetricKeys = [
+                    ...DEFAULT_METRIC_KEYS,
+                    ...dynamicSignals.map(s => s.name) // Add names from filters/dynamic signals
+                ];
+                const uniqueMetrics = [...new Set(allMetricKeys)];
 
-    // Determine the file path based on the request URL
-    let filePath = path.join(PUBLIC_DIR, req.url || '/');
+                 // Structure the response as expected by the frontend (array of signal objects)
+                 const responsePayload: AvailableSignal[] = uniqueMetrics.map(name => {
+                     const dynamicSignal = dynamicSignals.find(s => s.name === name);
+                     return {
+                         // Use dynamic signal ID if available, otherwise use name as ID for defaults
+                         id: dynamicSignal ? dynamicSignal.id : name,
+                         name: name,
+                         // Determine type based on whether it's in dynamicSignals (filter) or default (metric)
+                         type: dynamicSignal ? 'filter' : 'metric'
+                     };
+                 });
 
-    // If root URL, serve index.html
-    if (req.url === '/') {
-        filePath = INDEX_HTML_PATH;
+
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                // Send the array of AvailableSignal objects
+                res.end(JSON.stringify(responsePayload));
+                console.log(`Served /api/metrics with ${responsePayload.length} signals`);
+            } catch (error: any) {
+                console.error('Error fetching dynamic metrics:', error.message || error);
+                res.writeHead(500, { 'Content-Type': 'text/plain' });
+                res.end('Internal Server Error');
+            }
+        } else {
+            // Handle other potential /api routes or return 404
+            res.writeHead(404, { 'Content-Type': 'text/plain' });
+            res.end('API Endpoint Not Found');
+        }
+        return; // End processing for API requests
     }
 
-    // Prevent directory traversal
-    if (!filePath.startsWith(PUBLIC_DIR)) {
+
+    // --- Static File Serving (Refined) ---
+    // Basic security: Prevent path traversal, normalize URL
+    const safeSuffix = path.normalize(req.url).replace(/^(\.\.[\/\\])+/, '');
+    let requestedPath = path.join(PUBLIC_DIR, safeSuffix);
+
+    // Default to index.html if requesting root or a directory
+    if (safeSuffix === '/' || safeSuffix === '' || !path.extname(requestedPath)) {
+        requestedPath = path.join(PUBLIC_DIR, 'index.html');
+    }
+
+    // Ensure the resolved path is still within the public directory
+    const resolvedPath = path.resolve(requestedPath);
+    if (!resolvedPath.startsWith(PUBLIC_DIR)) {
         res.writeHead(403, { 'Content-Type': 'text/plain' });
         res.end('Forbidden');
         return;
     }
 
-    // Check if file exists and serve it
-    fs.readFile(filePath, (err, data) => {
-        if (err) {
-            if (err.code === 'ENOENT') {
-                // File not found
-                console.warn(`Static file not found: ${filePath}`);
-                res.writeHead(404, { 'Content-Type': 'text/plain' });
-                res.end('Not Found');
+
+    fs.readFile(resolvedPath, (error, content) => {
+        if (error) {
+            if (error.code === 'ENOENT') {
+                 // If the original request didn't have an extension (was likely a directory/SPA route)
+                 // try serving index.html as a fallback for SPA routing
+                if (!path.extname(safeSuffix)) {
+                    const indexPath = path.join(PUBLIC_DIR, 'index.html');
+                     fs.readFile(indexPath, (indexError, indexContent) => {
+                         if (indexError) {
+                             console.error(`Error serving index.html fallback for ${safeSuffix}: ${indexError}`);
+                             res.writeHead(404, { 'Content-Type': 'text/plain' });
+                             res.end('Not Found');
+                         } else {
+                            res.writeHead(200, { 'Content-Type': 'text/html' });
+                            res.end(indexContent, 'utf-8');
+                            console.log(`Served index.html for SPA route: ${safeSuffix}`);
+                         }
+                    });
+                } else {
+                    // If it had an extension and wasn't found, it's a genuine 404
+                    console.warn(`Static file not found: ${resolvedPath}`);
+                    res.writeHead(404, { 'Content-Type': 'text/plain' });
+                    res.end('Not Found');
+                }
             } else {
-                // Other server error
-                console.error(`Error reading file ${filePath}: ${err.code} - ${err.message}`);
-                res.writeHead(500, { 'Content-Type': 'text/plain' });
+                console.error(`Server error reading file ${resolvedPath}:`, error);
+                res.writeHead(500);
                 res.end('Internal Server Error');
             }
         } else {
-            // File found, determine content type and serve
-            const contentType = mime.lookup(filePath) || 'application/octet-stream';
+            // File found, serve it with correct MIME type
+            const contentType = mime.lookup(resolvedPath) || 'application/octet-stream';
             res.writeHead(200, { 'Content-Type': contentType });
-            res.end(data);
-            console.log(`Served static file: ${filePath} as ${contentType}`);
+            res.end(content, 'utf-8');
+            // console.log(`Served static file: ${resolvedPath}`); // Can be verbose
         }
     });
 });
 
-// Create a WebSocket server instance attached to the HTTP server.
-const wss = new WebSocketServer({ server });
 
-console.log(`HTTP and WebSocket server started on port ${PORT}`);
+// --- WebSocket Server Setup ---
+const wss = new WebSocketServer({ noServer: true }); // Don't let it create its own HTTP server
 
-// --- Constants for Time Ranges and Aggregation ---
-const MINUTE_MS = 60 * 1000;
-const HOUR_MS = 60 * MINUTE_MS;
-const ONE_DAY_MS = 24 * HOUR_MS;
-const ONE_WEEK_MS = 7 * ONE_DAY_MS;
-const ONE_MONTH_MS = 30 * ONE_DAY_MS;
-const MAX_HISTORY_MS = ONE_MONTH_MS;
-const PRUNE_AGE_MS = 31 * ONE_DAY_MS; // Data older than this might be pruned (currently not implemented).
-
-// The interval at which raw data is aggregated and stored (e.g., 10 seconds).
-const AGGREGATION_INTERVAL_MS = 10 * 1000;
-
-// Window sizes for calculating short-term and long-term moving averages.
-const SHORT_AVG_WINDOW_MS = 5 * MINUTE_MS;
-const LONG_AVG_WINDOW_MS = 1 * HOUR_MS;
-
-// Duration of recent data to keep in the in-memory buffer for historical requests
-// and for calculating live MAs incrementally. Should be slightly larger than the longest MA window.
-const LIVE_UPDATE_BUFFER_MS = LONG_AVG_WINDOW_MS + (5 * MINUTE_MS); // Keep a bit more than 1hr
+// --- Constants (Remove duplicate block) ---
+// Remove this block, use the one defined earlier
+// const MINUTE_MS = 60 * 1000;
+// const HOUR_MS = 60 * MINUTE_MS;
+// const ONE_DAY_MS = 24 * HOUR_MS;
+// const ONE_WEEK_MS = 7 * ONE_DAY_MS;
+// const ONE_MONTH_MS = 30 * ONE_DAY_MS;
+// const MAX_HISTORY_MS = ONE_MONTH_MS;
+// const PRUNE_AGE_MS = 31 * ONE_DAY_MS; // Data older than this might be pruned (currently not implemented).
+//
+// const AGGREGATION_INTERVAL_MS = 10 * 1000; // REMOVE THIS REDECLARATION
+//
+// const SHORT_AVG_WINDOW_MS = 5 * MINUTE_MS;
+// const LONG_AVG_WINDOW_MS = 1 * HOUR_MS;
+//
+// const LIVE_UPDATE_BUFFER_MS = LONG_AVG_WINDOW_MS + (5 * MINUTE_MS); // REMOVE THIS REDECLARATION
 
 /**
- * Broadcasts data (usually LiveUpdateMessage) to all connected WebSocket clients.
- * @param {any} data The data object to broadcast (will be JSON.stringified).
+ * Broadcasts data to all connected WebSocket clients.
  */
 function broadcast(data: any): void {
     const jsonData = JSON.stringify(data);
@@ -160,339 +309,169 @@ function broadcast(data: any): void {
 }
 
 // --- WebSocket Message Types ---
-// Define the structure for messages exchanged between client and server.
-
-/** Message sent by the client to request historical data. */
-interface RequestHistoryMessage {
-    type: 'requestHistory';
-    payload: {
-        languages: string[];
-        timeWindowMs: number;
-        desiredIntervalMs: number;
-    };
-}
-
-/** Structure for a single aggregated data point including calculated MAs (used in history/live updates). */
-interface HistoryEntry {
-    timestamp: number;
-    scores: SentimentScores; // Raw aggregated scores for the interval
-    postCount: number;
-    // Moving averages will be added later by calculateMAs
-    shortAvg?: SentimentScores | null;
-    longAvg?: SentimentScores | null;
-}
-
-/** Structure for historical data for a single language. */
-interface LanguageHistoryData {
-    language: string;
-    data: HistoryEntry[];
-}
-
-/** Message sent by the server containing requested historical data. */
-interface HistoryDataMessage {
-    type: 'historyData';
-    payload: {
-        results: LanguageHistoryData[];
-    };
-}
-
-/** Structure for a single live update data point. */
-interface LiveUpdateEntry {
-    language: string;
-    timestamp: number;
-    scores: SentimentScores;
-    postCount: number;
-    // *** ADDED: Optional MA fields for live updates ***
-    shortAvg?: SentimentScores | null;
-    longAvg?: SentimentScores | null;
-}
-
-/** Message sent by the server containing live data updates. */
-interface LiveUpdateMessage {
-    type: 'liveUpdate';
-    payload: {
-        updates: LiveUpdateEntry[];
-    };
-}
-
-/** Type alias for messages the client can send. */
-type ClientMessage = RequestHistoryMessage; // Add other types if needed
-/** Type alias for messages the server can send. */
-type ServerMessage = HistoryDataMessage | LiveUpdateMessage; // Add other types if needed
+// Moved to types.ts
 
 // --- WebSocket Connection Handling ---
-// Set up listeners for new WebSocket connections.
-wss.on('connection', async (ws: WebSocket) => {
-    console.log('Client connected');
-    // Initial history load is now triggered by a client 'requestHistory' message.
 
-    // Listener for messages received from a specific client.
+/**
+ * Handles a new WebSocket connection.
+ * Sets up message listeners and cleanup logic.
+ * @param {WebSocket} ws The WebSocket connection instance.
+ */
+async function handleWebSocketConnection(ws: WebSocket): Promise<void> {
+    console.log('Client connected via WebSocket');
+    // Initial history load is triggered by client 'requestHistory' message.
+
     ws.on('message', async (message: Buffer) => {
         let parsedMessage: ClientMessage;
         try {
             parsedMessage = JSON.parse(message.toString());
-            console.log('Received message:', parsedMessage.type);
+            console.log('Received WebSocket message:', parsedMessage.type);
 
-            // Handle History Request
+            // --- Handle History Request ---
             if (parsedMessage.type === 'requestHistory') {
-                const { languages, timeWindowMs, desiredIntervalMs } = parsedMessage.payload;
+                const { languages, timeWindowMs, desiredIntervalMs, signalNames } = parsedMessage.payload;
 
-                if (!Array.isArray(languages) || languages.length === 0 || !timeWindowMs || !desiredIntervalMs) {
-                    console.warn('Invalid requestHistory payload:', parsedMessage.payload);
-                    // Optionally send error back to client
+                // Correct Validation: Check all expected fields including signalNames
+                if (!Array.isArray(languages) || typeof timeWindowMs !== 'number' || timeWindowMs <= 0 ||
+                    typeof desiredIntervalMs !== 'number' || desiredIntervalMs <= 0 ||
+                    !Array.isArray(signalNames)) {
+                    console.warn('Invalid requestHistory payload structure or values:', parsedMessage.payload);
+                    ws.send(JSON.stringify({ type: 'error', payload: 'Invalid history request format' }));
+                    return;
+                }
+
+                // Handle empty signalNames gracefully (send empty response)
+                if (signalNames.length === 0) {
+                    console.log("requestHistory received with no signalNames. Sending empty results.");
+                    const emptyResponse: HistoryDataMessage = { type: 'historyData', payload: { signalLangData: {} } };
+                    ws.send(JSON.stringify(emptyResponse));
                     return;
                 }
 
                 const endTime = new Date();
                 const startTime = new Date(endTime.getTime() - timeWindowMs);
 
-                console.log(`Handling requestHistory for ${languages.join(',')}, window ${timeWindowMs/1000/60}m, interval ${desiredIntervalMs/1000}s`);
+                console.log(`Handling requestHistory for signals [${signalNames.join(',')}] & languages [${languages.join(',')}] from ${startTime.toISOString()} to ${endTime.toISOString()}`);
 
-                // 1. Get aggregated data from the database based on the requested parameters.
-                const aggregatedData = await getAggregatedData(languages, startTime, endTime, desiredIntervalMs);
+                // 1. Fetch and Aggregate Data
+                // NOTE: getAggregatedData currently only uses languages. Needs update to handle signalNames if filters affect aggregation source.
+                // For now, we fetch based on language and *later* associate with signal names.
+                const aggregatedDataByLang = await getAggregatedData(languages, startTime, endTime, desiredIntervalMs);
 
-                // 2. Calculate short-term and long-term moving averages for the aggregated data.
-                const dataWithMAs = calculateMAsForAggregatedData(aggregatedData, desiredIntervalMs, SHORT_AVG_WINDOW_MS, LONG_AVG_WINDOW_MS);
+                // 2. Calculate MAs
+                const dataWithMAsByLang = calculateMAsForAggregatedData(aggregatedDataByLang, desiredIntervalMs, parseInt(process.env.SHORT_AVG_WINDOW_MS || (5 * 60 * 1000).toString(), 10), parseInt(process.env.LONG_AVG_WINDOW_MS || (60 * 60 * 1000).toString(), 10));
 
-                // 3. Format the data into the structure expected by the client.
-                const results: LanguageHistoryData[] = [];
-                dataWithMAs.forEach((data, lang) => {
-                    results.push({ language: lang, data: data });
-                });
+                // 3. Format the data for response (signalLangKey structure)
+                const signalLangDataPayload: { [signalLangKey: string]: HistoryEntry[] } = {};
+                signalNames.forEach(signalName => {
+                     languages.forEach(langCode => {
+                         const signalLangKey = `${signalName}_${langCode}`;
+                         const langData = dataWithMAsByLang.get(langCode);
+                         if (langData) {
+                             // Assign the MA-calculated data for this language to the signalLangKey
+                             signalLangDataPayload[signalLangKey] = langData;
+                         } else {
+                              signalLangDataPayload[signalLangKey] = []; // Assign empty array if no data for this lang
+                         }
+                     });
+                 });
+
 
                 const response: HistoryDataMessage = {
                     type: 'historyData',
-                    payload: { results: results }
+                    payload: { signalLangData: signalLangDataPayload }
                 };
 
-                // 4. Send back to client
-                 ws.send(JSON.stringify(response), (err) => {
+                ws.send(JSON.stringify(response), (err) => {
                     if (err) console.error('Error sending historyData to client:', err);
-                    else console.log(`Sent historyData for ${languages.join(',')} to client.`);
+                    else console.log(`Sent historyData for signals [${signalNames.join(',')}] & langs [${languages.join(',')}] to client.`);
                 });
+            } else {
+                 console.log(`Received unhandled message type: ${parsedMessage.type}`);
             }
 
         } catch (err: any) {
             console.error('Failed to parse client message or process request:', err.message || err);
-            // Optionally send an error message back to the client
+            ws.send(JSON.stringify({ type: 'error', payload: 'Server error processing message' }));
         }
     });
 
-    // Listener for when a client connection is closed.
     ws.on('close', () => {
-        console.log('Client disconnected');
+        console.log('WebSocket client disconnected');
     });
 
-    // Listener for errors occurring on a client connection.
     ws.on('error', (error: Error) => {
         console.error('WebSocket client error:', error);
+        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+            ws.close();
+        }
     });
-});
-
-// --- Data Structures for Aggregation ---
-
-/** Represents the raw aggregated scores for a single time interval (before MAs). */
-interface AggregatedScoreEntry {
-    timestamp: number | Date;
-    scores: SentimentScores;
-    postCount: number;
-    language?: string; // Add optional language field for type safety later
 }
 
-// Temporary accumulators holding the sum of scores and post counts for the *current*
-// aggregation interval, keyed by language code (e.g., 'eng'). Reset every AGGREGATION_INTERVAL_MS.
-let currentIntervalScores: { [lang: string]: SentimentScores } = {};
-let currentIntervalPostCount: { [lang: string]: number } = {};
+// --- Data Structures & Helper Functions ---
 
-// In-memory buffer holding recent `HistoryEntry` data points (including MAs).
-// Used to quickly serve `requestHistory` messages for recent time windows and
-// as the basis for incremental live MA calculations. Pruned periodically.
-let recentHistoryBuffer: { [lang: string]: HistoryEntry[] } = {};
-
-/** State required for calculating a moving average incrementally (one per MA type per language). */
-interface WindowState {
-    queue: HistoryEntry[]; // Holds entries currently in the window
-    summedScores: SentimentScores;
-    summedPostCount: number;
-    windowPoints: number; // Max size of the queue
-}
-// Holds the state for incremental calculation of short and long MAs for each active language.
-let liveMAState: {
-    [lang: string]: {
-        short: WindowState;
-        long: WindowState;
-    }
-} = {};
-
-/**
- * Helper function to create an empty SentimentScores object with all categories initialized to 0.
- * @returns {SentimentScores} An empty scores object.
- */
-function createEmptyScores(): SentimentScores {
-    return { anger: 0, anticipation: 0, disgust: 0, fear: 0, joy: 0, sadness: 0, surprise: 0, trust: 0, positive: 0, negative: 0 };
-}
-
-/**
- * Helper function to add the values from a source SentimentScores object to a target object.
- * Modifies the target object in place.
- * @param {SentimentScores} target The scores object to add to.
- * @param {SentimentScores} source The scores object to add from.
- */
+/** Helper to add scores. Modifies target in place. */
 function addScores(target: SentimentScores, source: SentimentScores): void {
+    // Revert to for...in with hasOwnProperty check
     for (const key in source) {
-        if (target.hasOwnProperty(key)) {
-            target[key as keyof SentimentScores] += source[key as keyof SentimentScores];
+        if (Object.prototype.hasOwnProperty.call(source, key)) {
+            const stringKey = key as keyof SentimentScores;
+            if (target.hasOwnProperty(stringKey)) {
+                target[stringKey] += source[stringKey];
+            }
         }
     }
 }
 
-/**
- * Helper function to subtract the values from a source SentimentScores object from a target object.
- * Modifies the target object in place. Used for removing elements from MA windows.
- * @param {SentimentScores} target The scores object to subtract from.
- * @param {SentimentScores} source The scores object to subtract.
- */
+/** Helper to subtract scores. Modifies target in place. */
 function subtractScores(target: SentimentScores, source: SentimentScores): void {
+    // Revert to for...in with hasOwnProperty check
     for (const key in source) {
-        if (target.hasOwnProperty(key)) {
-            target[key as keyof SentimentScores] -= source[key as keyof SentimentScores];
+        if (Object.prototype.hasOwnProperty.call(source, key)) {
+            const stringKey = key as keyof SentimentScores;
+            if (target.hasOwnProperty(stringKey)) {
+                target[stringKey] -= source[stringKey];
+            }
         }
     }
 }
 
-/**
- * Updates the state for an incremental moving average window.
- * Adds the new entry, removes the oldest entry if the window size is exceeded,
- * and recalculates the average scores based on the current window contents.
- * @param {WindowState} state The current state of the moving average window.
- * @param {HistoryEntry} newEntry The new data entry to add to the window.
- * @returns {SentimentScores | null} The calculated average scores for the window, or null if the window has no posts.
- */
+/** Updates incremental MA window state and returns new average. */
 function updateIncrementalWindowState(state: WindowState, newEntry: HistoryEntry): SentimentScores | null {
-    // Add new entry to sums and queue
-    addScores(state.summedScores, newEntry.scores);
+    if (!state.summedScores) state.summedScores = createEmptyScores();
+    if (newEntry.scores) {
+        addScores(state.summedScores, newEntry.scores);
+    }
     state.summedPostCount += newEntry.postCount;
     state.queue.push(newEntry);
 
-    // Remove old entry if window exceeds size
     if (state.queue.length > state.windowPoints) {
-        const oldEntry = state.queue.shift(); // Remove from the front (oldest)
-        if (oldEntry) {
-            subtractScores(state.summedScores, oldEntry.scores);
-            state.summedPostCount -= oldEntry.postCount;
+        const oldEntry = state.queue.shift();
+        if (oldEntry?.scores) {
+             subtractScores(state.summedScores, oldEntry.scores);
+             state.summedPostCount -= oldEntry.postCount;
         }
     }
 
-    // Calculate and return MA if window is full and valid
     if (state.queue.length > 0 && state.summedPostCount > 0) {
         const avgScores = createEmptyScores();
         for (const key in avgScores) {
-            avgScores[key as keyof SentimentScores] = state.summedScores[key as keyof SentimentScores] / state.summedPostCount;
+             if (Object.prototype.hasOwnProperty.call(avgScores, key)) {
+                 const stringKey = key as keyof SentimentScores;
+                 if (state.summedScores?.hasOwnProperty(stringKey)) {
+                      // @ts-ignore - Suppress symbol index error
+                      avgScores[stringKey] = (state.summedScores as SentimentScores)[stringKey] / state.summedPostCount;
+                 }
+             }
         }
         return avgScores;
     } else {
-        // Window not full or no posts in window
         return null;
     }
 }
 
-// --- Interface Definitions ---
-
-/**
- * Defines the structure of commit metadata passed from the FirehoseSubscription callback.
- */
-export interface CommitData {
-    repo: string;
-    time: string;
-    commit: any;
-    ops: any[];
-}
-
-let postCounter = 0;
-const THROTTLE_FACTOR = 1; // Process 1 out of every N posts (1 = process all).
-
-/**
- * Callback function passed to the FirehoseSubscription.
- * Called for each `app.bsky.feed.post` record extracted from the firehose.
- * Performs language detection, sentiment analysis (if language is supported),
- * and updates the temporary accumulators (`currentIntervalScores`, `currentIntervalPostCount`).
- * Implements basic throttling using `THROTTLE_FACTOR`.
- *
- * @param {AppBskyFeedPost.Record} postRecord The parsed post record.
- * @param {CommitData} commitData Metadata about the commit containing the post.
- */
-function processPost(postRecord: AppBskyFeedPost.Record, commitData: CommitData): void {
-    postCounter++;
-    if (postCounter % THROTTLE_FACTOR !== 0) {
-        return;
-    }
-
-    if (!postRecord.text) return;
-    const postText = postRecord.text;
-    const langCode = franc(postText, { minLength: 3 }); // Use franc code directly
-
-    // Analyze sentiment IF language is supported by loaded lexicons
-    const sentimentScores = analyzeSentiment(postText, langCode);
-
-    if (sentimentScores !== null) {
-        // Ensure accumulator exists for this language in this interval
-        if (!currentIntervalScores[langCode]) {
-            currentIntervalScores[langCode] = createEmptyScores();
-            currentIntervalPostCount[langCode] = 0;
-        }
-        // Add scores to the correct language bucket
-        addScores(currentIntervalScores[langCode], sentimentScores);
-        currentIntervalPostCount[langCode]++; // Increment language-specific post counter
-    } else {
-        // Optional: Log unsupported languages if needed for debugging lexicon mapping
-        // if (langCode !== 'und') { // Avoid logging undetermined
-        //     console.log(`Skipping post - unsupported language detected: ${langCode}`);
-        // }
-    }
-}
-
-// --- Reusable Moving Average Helper Functions ---
-
-/**
- * Calculates a simple moving average for an array of numbers or nulls.
- * @param data An array of numbers or nulls.
- * @param windowSize The number of data points in the moving average window.
- * @returns An array of the same length containing the calculated averages or nulls.
- * @deprecated Less relevant now due to `calculateSentimentMovingAverage`.
- */
-function calculateNumericMovingAverage(data: (number | null)[], windowSize: number): (number | null)[] {
-    if (windowSize <= 0) {
-        // Return array of nulls if window size is invalid
-        return Array(data.length).fill(null);
-    }
-
-    const result: (number | null)[] = Array(data.length).fill(null); // Initialize with nulls
-    let sum = 0;
-    let count = 0;
-
-    for (let i = 0; i < data.length; i++) {
-        const enteringValue = data[i];
-        if (enteringValue !== null) {
-            sum += enteringValue;
-            count++;
-        }
-        if (i >= windowSize) {
-            const exitingValue = data[i - windowSize];
-            if (exitingValue !== null) {
-                sum -= exitingValue;
-                count--;
-            }
-        }
-        // Calculate MA only if the window is full
-        if (i >= windowSize - 1) {
-            if (count > 0) {
-                result[i] = sum / count;
-            } // else: result[i] remains null
-        }
-    }
-    return result;
-}
-
+// --- Re-add calculateSentimentMovingAverage ---
 /**
  * Calculates moving averages for sentiment scores, weighted by post count.
  * Handles partial windows at the beginning of the data series.
@@ -502,65 +481,119 @@ function calculateNumericMovingAverage(data: (number | null)[], windowSize: numb
  *          average SentimentScores for each point, or null if the window had zero posts.
  */
 function calculateSentimentMovingAverage(data: HistoryEntry[], windowPoints: number): (SentimentScores | null)[] {
-     const result: (SentimentScores | null)[] = Array(data.length).fill(null); // Initialize with nulls
-     const categories = Object.keys(createEmptyScores()) as (keyof SentimentScores)[];
-
-     // Use running sums for post-weighted average
+     const result: (SentimentScores | null)[] = Array(data.length).fill(null);
+     const categories = Object.keys(createEmptyScores()) as (keyof SentimentScores)[]; // Keep using Object.keys for known categories
      const runningSums: SentimentScores = createEmptyScores();
      let runningCount = 0;
-     const windowQueue: HistoryEntry[] = []; // Keep track of entries in the current window
+     const windowQueue: HistoryEntry[] = [];
 
      for (let i = 0; i < data.length; i++) {
          const currentEntry = data[i];
-
-         // Add current entry to sums and queue
-         addScores(runningSums, currentEntry.scores);
-         runningCount += currentEntry.postCount;
+         // Ensure currentEntry.scores exists before adding
+         if (currentEntry.scores) {
+            addScores(runningSums, currentEntry.scores);
+            runningCount += currentEntry.postCount;
+         }
          windowQueue.push(currentEntry);
 
-         // Remove oldest entry if window is exceeded
          if (windowQueue.length > windowPoints) {
-             const oldestEntry = windowQueue.shift(); // Remove from front
-             if (oldestEntry) {
+             const oldestEntry = windowQueue.shift();
+             // Ensure oldestEntry and its scores exist before subtracting
+             if (oldestEntry?.scores) {
                  subtractScores(runningSums, oldestEntry.scores);
                  runningCount -= oldestEntry.postCount;
              }
          }
 
-         // Calculate MA if there are posts in the current (potentially partial) window
          if (runningCount > 0) {
              const avgScores = createEmptyScores();
-             for (const category of categories) {
-                 avgScores[category] = runningSums[category] / runningCount;
-             }
+             categories.forEach(category => {
+                 if (runningSums?.hasOwnProperty(category)) {
+                    // @ts-ignore - Suppress symbol index error
+                    avgScores[category] = (runningSums as SentimentScores)[category] / runningCount;
+                 }
+             });
              result[i] = avgScores;
          } else {
-             result[i] = null; // Still null if window has zero posts
+             result[i] = null;
          }
      }
      return result;
 }
 
-// --- Server-Side Data Aggregation and Retrieval ---
-
-/** Represents a raw row fetched from the `sentiment_data` table. */
-interface RawDbEntry extends AggregatedScoreEntry {
-    language: string;
-    timestamp: Date; // Comes from DB as Date
-}
+// --- Firehose Processing ---
+let postCounter = 0;
+const THROTTLE_FACTOR = parseInt(process.env.THROTTLE_FACTOR || '1', 10);
 
 /**
- * Fetches raw sentiment data from the database for the specified languages and time range,
- * then aggregates it into buckets based on the desired `intervalMs`.
- * Averages the scores within each bucket based on the number of raw data points contributing to it.
- *
- * @param {string[]} languages Array of ISO 639-3 language codes to fetch.
- * @param {Date} startTime The start of the time range (inclusive).
- * @param {Date} endTime The end of the time range (exclusive).
- * @param {number} intervalMs The desired aggregation interval in milliseconds.
- * @returns {Promise<Map<string, HistoryEntry[]>>} A Promise resolving to a Map where keys are language codes
- *          and values are arrays of aggregated `HistoryEntry` objects, sorted by timestamp.
- * @async
+ * Callback for FirehoseSubscription. Processes the received object, 
+ * assuming it's a post record.
+ * @param {any} record The raw object received from the firehose stream.
+ */
+async function handleFirehoseRecord(record: any): Promise<void> {
+    // console.log('Raw Record Received:', JSON.stringify(record)); 
+
+    try {
+        // Check if it looks like a valid post record
+        if (!record || typeof record !== 'object' || record.$type !== 'app.bsky.feed.post') {
+            // console.log('Skipping record - not a feed post:', record?.$type);
+            return;
+        }
+
+        // Use type assertion now that we've checked $type
+        const postRecord = record as AppBskyFeedPost.Record;
+
+        // Throttle
+        postCounter++;
+        if (postCounter % THROTTLE_FACTOR !== 0) return;
+
+        // Validate necessary fields from the record itself
+        if (!postRecord.text || typeof postRecord.text !== 'string' || postRecord.text.trim().length === 0) {
+            // console.log('Skipping post - no text content.');
+            return;
+        }
+
+         const postText = postRecord.text;
+         // Use provided langs array if available, otherwise detect
+         // Note: franc detection might still be useful as fallback or primary
+         let langCode = 'und'; // Default to undetermined
+         if (Array.isArray(postRecord.langs) && postRecord.langs.length > 0) {
+             // TODO: Decide how to handle multiple languages? Use the first? 
+             // For now, use franc to detect from text.
+             langCode = franc(postText, { minLength: 3, ignore: ['und'] }); 
+             // console.log(`Detected language: ${langCode} (Provided: ${postRecord.langs.join(', ')})`);
+         } else {
+             langCode = franc(postText, { minLength: 3, ignore: ['und'] });
+             // console.log(`Detected language: ${langCode} (None provided)`);
+         }
+         
+         // --- TODO: Evaluate against Dynamic Filters --- 
+         const sentimentScores = await analyzeSentiment(postText, langCode);
+         if (sentimentScores !== null) {
+             // Use langCode detected by franc
+             if (!currentIntervalScores[langCode]) {
+                 currentIntervalScores[langCode] = createEmptyScores();
+                 currentIntervalPostCount[langCode] = 0;
+             }
+             addScores(currentIntervalScores[langCode], sentimentScores);
+             currentIntervalPostCount[langCode]++;
+             // --- TODO: Accumulate Filter Counts --- 
+         }
+
+    } catch (error) {
+        console.error('Error processing received firehose record:', error);
+        console.error('Record data:', JSON.stringify(record)); // Log the problematic record
+    }
+}
+
+
+// --- Moving Average Helpers ---
+// ... (calculateSentimentMovingAverage remains the same) ...
+
+// --- Server-Side Data Aggregation/Retrieval ---
+
+/**
+ * Fetches raw sentiment data and aggregates it.
  */
 async function getAggregatedData(
     languages: string[],
@@ -571,273 +604,212 @@ async function getAggregatedData(
     console.log(`Aggregating data for ${languages.join(', ')} from ${startTime.toISOString()} to ${endTime.toISOString()} with interval ${intervalMs / 1000}s`);
     const resultByLang = new Map<string, HistoryEntry[]>();
     languages.forEach(lang => resultByLang.set(lang, []));
-
+    const client: PoolClient = await pool.connect();
     try {
-        // Query raw 10s data
-        const queryResult: QueryResult<RawDbEntry> = await pool.query(
+        const queryResult: QueryResult<RawDbEntry> = await client.query(
             `SELECT timestamp, language, scores, post_count as "postCount"
              FROM sentiment_data
              WHERE timestamp >= $1 AND timestamp < $2 AND language = ANY($3::VARCHAR[])
              ORDER BY timestamp ASC`,
             [startTime, endTime, languages]
         );
-
         console.log(` -> Fetched ${queryResult.rowCount} raw rows from DB.`);
-        if (queryResult.rowCount === 0) {
-            return resultByLang; // No data found
-        }
+        if (queryResult.rowCount === 0) return resultByLang;
 
-        // Aggregate into buckets
-        const buckets = new Map<string, { scores: SentimentScores; postCount: number; numPoints: number }>(); // Key: "lang_bucketTimestamp"
-
-        queryResult.rows.forEach((row: RawDbEntry) => { // Explicitly type 'row'
+        const buckets = new Map<string, { scores: SentimentScores; postCount: number; numPoints: number }>();
+        queryResult.rows.forEach((row) => { // row implicitly has RawDbEntry type now
             const bucketTimestamp = Math.floor(row.timestamp.getTime() / intervalMs) * intervalMs;
             const bucketKey = `${row.language}_${bucketTimestamp}`;
-
             if (!buckets.has(bucketKey)) {
                 buckets.set(bucketKey, { scores: createEmptyScores(), postCount: 0, numPoints: 0 });
             }
-
             const bucket = buckets.get(bucketKey)!;
+            // addScores uses Object.keys now
             addScores(bucket.scores, row.scores);
             bucket.postCount += row.postCount;
             bucket.numPoints++;
         });
 
-        // Average scores and organize by language
         buckets.forEach((bucketData, key) => {
             const [lang, tsString] = key.split('_');
             const timestamp = parseInt(tsString, 10);
-            const avgScores = { ...bucketData.scores };
-
-            // Average the scores based on the number of raw data points (from 10s intervals) in the bucket
+            const avgScores = createEmptyScores();
             if (bucketData.numPoints > 0) {
-                 for (const scoreKey in avgScores) {
-                    avgScores[scoreKey as keyof SentimentScores] /= bucketData.numPoints;
-                }
+                 for (const scoreKey in bucketData.scores) {
+                      if (Object.prototype.hasOwnProperty.call(bucketData.scores, scoreKey)){
+                          const stringKey = scoreKey as keyof SentimentScores;
+                          if (avgScores.hasOwnProperty(stringKey)) {
+                              // @ts-ignore - Suppress symbol index error
+                              avgScores[stringKey] = Number((bucketData.scores as SentimentScores)[stringKey]) / bucketData.numPoints;
+                          }
+                      }
+                 }
             }
-
-            if (!resultByLang.has(lang)) resultByLang.set(lang, []); // Should exist, but safety check
-
-            resultByLang.get(lang)!.push({
-                timestamp: timestamp,
-                scores: avgScores,
-                postCount: bucketData.postCount
-            });
+            if (!resultByLang.has(lang)) resultByLang.set(lang, []);
+            resultByLang.get(lang)!.push({ timestamp: timestamp, scores: avgScores, postCount: bucketData.postCount });
         });
-
-        // Sort each language's data by timestamp (important for MAs)
         resultByLang.forEach(data => data.sort((a, b) => a.timestamp - b.timestamp));
         console.log(` -> Aggregated into buckets for ${resultByLang.size} languages.`);
-
     } catch (err: any) {
         console.error("Error during getAggregatedData:", err.message || err);
+    } finally {
+         client.release();
     }
-
     return resultByLang;
 }
 
 /**
- * Calculates short-term and long-term moving averages for pre-aggregated sentiment data.
- * Modifies the input `aggregatedData` map by adding `shortAvg` and `longAvg` properties
- * to each `HistoryEntry` object.
- *
- * @param {Map<string, HistoryEntry[]>} aggregatedData Map of language codes to arrays of aggregated data (output from `getAggregatedData`).
- * @param {number} intervalMs The aggregation interval used for the input data (e.g., 60000 for 1 minute).
- * @param {number} shortWindowMs The window size in milliseconds for the short-term MA.
- * @param {number} longWindowMs The window size in milliseconds for the long-term MA.
- * @returns {Map<string, HistoryEntry[]>} The input map, modified with calculated MA values.
+ * Calculates MAs for aggregated data.
  */
 function calculateMAsForAggregatedData(
-    aggregatedData: Map<string, HistoryEntry[]>, 
+    aggregatedData: Map<string, HistoryEntry[]>,
     intervalMs: number,
-    shortWindowMs: number, // e.g., 5 * 60 * 1000
-    longWindowMs: number  // e.g., 60 * 60 * 1000
-): Map<string, HistoryEntry[]> { // Modifies the input map structure
-    console.log(`Calculating MAs (Short: ${shortWindowMs/60000}m, Long: ${longWindowMs/60000}m)`);
+    shortWindowMs: number,
+    longWindowMs: number
+): Map<string, HistoryEntry[]> {
+     console.log(`Calculating MAs (Short: ${shortWindowMs/60000}m, Long: ${longWindowMs/60000}m)`);
     aggregatedData.forEach((langData, lang) => {
         if (langData.length === 0) return;
-
         const shortPoints = Math.max(1, Math.round(shortWindowMs / intervalMs));
         const longPoints = Math.max(1, Math.round(longWindowMs / intervalMs));
-
-        console.log(`  -> Lang [${lang}]: Using ${shortPoints} points for short MA, ${longPoints} points for long MA (interval: ${intervalMs/1000}s).`);
-
         const shortMA = calculateSentimentMovingAverage(langData, shortPoints);
         const longMA = calculateSentimentMovingAverage(langData, longPoints);
-
-        // Add MAs back to the data entries
         for (let i = 0; i < langData.length; i++) {
             langData[i].shortAvg = shortMA[i];
             langData[i].longAvg = longMA[i];
         }
     });
-    return aggregatedData; // Return the modified map
+    return aggregatedData;
 }
+
 
 // --- Aggregation Timer & Live Update Logic ---
 
 /**
- * Function executed periodically by `setInterval` (every `AGGREGATION_INTERVAL_MS`).
- * 1. Takes the accumulated scores and counts from the last interval.
- * 2. Resets the accumulators (`currentIntervalScores`, `currentIntervalPostCount`).
- * 3. Saves the aggregated data to the database.
- * 4. Calculates the latest incremental moving averages using `liveMAState`.
- * 5. Adds the new data point (with MAs) to the `recentHistoryBuffer` and prunes the buffer.
- * 6. Prepares a `LiveUpdateMessage` payload with the latest data (including MAs) for active languages.
- * 7. Broadcasts the live update message to all connected WebSocket clients.
- * @async
+ * Periodic function to aggregate data, store it, calculate MAs, and broadcast live updates.
  */
 async function aggregateAndStore(): Promise<void> {
     const now = Date.now();
     const timestamp = new Date(now);
     const savedScoresByLang = { ...currentIntervalScores };
     const savedPostCountByLang = { ...currentIntervalPostCount };
-    currentIntervalScores = {}; // Reset accumulators for next interval
+    currentIntervalScores = {};
     currentIntervalPostCount = {};
-
     const liveUpdatePayload: LiveUpdateEntry[] = [];
-    const bufferCutoffTime = now - LIVE_UPDATE_BUFFER_MS; // For recentHistoryBuffer pruning
+    const bufferCutoffTime = now - LIVE_UPDATE_BUFFER_MS;
+    const client: PoolClient = await pool.connect();
+    try {
+        for (const langCode in savedScoresByLang) {
+             if (savedScoresByLang.hasOwnProperty(langCode)) {
+                const scores = savedScoresByLang[langCode];
+                const postCount = savedPostCountByLang[langCode] || 0;
+                if (postCount > 0) {
+                    try {
+                       await client.query(
+                           `INSERT INTO sentiment_data (timestamp, language, scores, post_count) VALUES ($1, $2, $3, $4) ON CONFLICT (timestamp, language) DO NOTHING;`,
+                           [timestamp, langCode, JSON.stringify(scores), postCount]
+                        );
+                    } catch (err: any) { console.error(`Error saving data for lang [${langCode}]:`, err.message || err); }
 
-    // Process each language that had activity in the last interval
-    for (const langCode in savedScoresByLang) {
-        if (savedScoresByLang.hasOwnProperty(langCode)) {
-            const scores = savedScoresByLang[langCode];
-            const postCount = savedPostCountByLang[langCode] || 0;
+                    const currentEntry: HistoryEntry = { timestamp: now, scores: scores, postCount: postCount };
 
-            if (postCount > 0) {
-                // 1. Save to DB (as before)
-                try {
-                    await pool.query(
-                       `INSERT INTO sentiment_data (timestamp, language, scores, post_count)
-                        VALUES ($1, $2, $3, $4)
-                        ON CONFLICT (timestamp, language) DO NOTHING;`,
-                       [timestamp, langCode, JSON.stringify(scores), postCount]
-                    );
-                } catch (err: any) {
-                    console.error(`Error saving data for lang [${langCode}]:`, err.message || err);
-                }
+                    if (!liveMAState[langCode]) {
+                        liveMAState[langCode] = {
+                            short: { queue: [], summedScores: createEmptyScores(), summedPostCount: 0, windowPoints: SHORT_AVG_WINDOW_POINTS },
+                            long: { queue: [], summedScores: createEmptyScores(), summedPostCount: 0, windowPoints: LONG_AVG_WINDOW_POINTS }
+                        };
+                    }
+                    const latestShortAvg = updateIncrementalWindowState(liveMAState[langCode].short, currentEntry);
+                    const latestLongAvg = updateIncrementalWindowState(liveMAState[langCode].long, currentEntry);
+                    currentEntry.shortAvg = latestShortAvg;
+                    currentEntry.longAvg = latestLongAvg;
 
-                // 2. Prepare data entry for buffer and live update
-                const currentEntry: HistoryEntry = {
-                    timestamp: now,
-                    scores: scores,
-                    postCount: postCount,
-                    // MAs will be calculated incrementally next
-                };
+                    if (!recentHistoryBuffer[langCode]) recentHistoryBuffer[langCode] = [];
+                    recentHistoryBuffer[langCode].push(currentEntry);
+                    recentHistoryBuffer[langCode] = recentHistoryBuffer[langCode].filter(entry => entry.timestamp >= bufferCutoffTime).sort((a, b) => a.timestamp - b.timestamp);
 
-                // 3. Initialize Live MA State for this language if it's new
-                if (!liveMAState[langCode]) {
-                    const approxInterval = AGGREGATION_INTERVAL_MS;
-                    liveMAState[langCode] = {
-                        short: {
-                            queue: [],
-                            summedScores: createEmptyScores(),
-                            summedPostCount: 0,
-                            windowPoints: Math.max(1, Math.round(SHORT_AVG_WINDOW_MS / approxInterval))
-                        },
-                        long: {
-                            queue: [],
-                            summedScores: createEmptyScores(),
-                            summedPostCount: 0,
-                            windowPoints: Math.max(1, Math.round(LONG_AVG_WINDOW_MS / approxInterval))
-                        }
-                    };
-                    console.log(`Initialized live MA state for [${langCode}]: Short=${liveMAState[langCode].short.windowPoints}pts, Long=${liveMAState[langCode].long.windowPoints}pts`);
-                }
-
-                // 4. Calculate Latest MAs Incrementally
-                const latestShortAvg = updateIncrementalWindowState(liveMAState[langCode].short, currentEntry);
-                const latestLongAvg = updateIncrementalWindowState(liveMAState[langCode].long, currentEntry);
-
-                // *** Logging the results of incremental calculation ***
-                // console.log(` -> Lang [${langCode}] Incremental MA: Short=`, JSON.stringify(latestShortAvg));
-                // console.log(` -> Lang [${langCode}] Incremental MA: Long=`, JSON.stringify(latestLongAvg));
-
-                // Add calculated MAs (which might be null) to the entry
-                currentEntry.shortAvg = latestShortAvg;
-                currentEntry.longAvg = latestLongAvg;
-
-                // 5. Update & Prune In-Memory Buffer (recentHistoryBuffer - still needed for history requests)
-                if (!recentHistoryBuffer[langCode]) {
-                    recentHistoryBuffer[langCode] = [];
-                }
-                recentHistoryBuffer[langCode].push(currentEntry); // Add entry with calculated MAs
-                // Keep buffer sorted and remove old entries (based on LIVE_UPDATE_BUFFER_MS)
-                recentHistoryBuffer[langCode] = recentHistoryBuffer[langCode]
-                    .filter(entry => entry.timestamp >= bufferCutoffTime)
-                    .sort((a, b) => a.timestamp - b.timestamp); // Ensure sorted
-
-                // 6. Add entry (with incrementally calculated MAs) to live broadcast payload
-                liveUpdatePayload.push({
-                    language: langCode,
-                    timestamp: currentEntry.timestamp,
-                    scores: currentEntry.scores,
-                    postCount: currentEntry.postCount,
-                    shortAvg: currentEntry.shortAvg,
-                    longAvg: currentEntry.longAvg
-                });
-            }
-        }
+                    DEFAULT_METRIC_KEYS.forEach(signalName => {
+                         liveUpdatePayload.push({
+                             signalName: signalName,
+                             language: langCode,
+                             timestamp: currentEntry.timestamp,
+                             scores: currentEntry.scores,
+                             postCount: currentEntry.postCount,
+                             shortAvg: currentEntry.shortAvg,
+                             longAvg: currentEntry.longAvg
+                         });
+                    });
+                 }
+             }
+         }
+    } catch (error) {
+        console.error("Error during aggregation/storage:", error);
+    } finally {
+         client.release();
     }
-
-    // --- Broadcasting Logic ---
-    // Send live updates only if there are connected clients and data was processed.
-    if (liveUpdatePayload.length > 0 && wss.clients.size > 0) {
-        const message: LiveUpdateMessage = {
-            type: 'liveUpdate',
-            payload: { updates: liveUpdatePayload }
-        };
-        // *** ADDED: Log the actual payload being sent ***
-        console.log(`Broadcasting liveUpdate with ${liveUpdatePayload.length} entries. Sample[0]:`, JSON.stringify(liveUpdatePayload[0]));
+     if (liveUpdatePayload.length > 0 && wss.clients.size > 0) {
+        const message: LiveUpdateMessage = { type: 'liveUpdate', payload: { updates: liveUpdatePayload } };
+        console.log(`Broadcasting liveUpdate with ${liveUpdatePayload.length} signal entries.`);
         broadcast(message);
     }
 }
 
 // --- Main Application Entry Point ---
 
-/**
- * The main function to start the application.
- * Initializes the database, starts the periodic aggregation timer (`aggregateAndStore`),
- * connects to the Bluesky Firehose, and starts the HTTP/WebSocket server.
- * @async
- */
 async function main() {
-    console.log('Starting Bluesky Sentiment Analysis Service...');
+    try {
+        console.log("Initializing database...");
+        await initializeDatabase();
 
-    // Initialize Database FIRST
-    await initializeDatabase();
+        console.log("Loading initial dynamic signals from DB...");
+        dynamicSignals = await loadDynamicSignalsFromDB(); // Load signals at startup
+        console.log(` -> Loaded ${dynamicSignals.length} dynamic signals:`, dynamicSignals.map(s => s.name));
 
-    // Start the aggregation timer
-    setInterval(aggregateAndStore, AGGREGATION_INTERVAL_MS);
-    console.log(`Data aggregation and saving started every ${AGGREGATION_INTERVAL_MS / 1000} seconds.`);
+        // Start the aggregation and storage loop
+        console.log(`Starting aggregation loop with interval: ${AGGREGATION_INTERVAL_MS / 1000}s`);
+        // Run once at start to initialize MA states if needed, then set interval
+        // await aggregateAndStore(); // Optional initial run? Consider MA state initialization.
+        setInterval(aggregateAndStore, AGGREGATION_INTERVAL_MS);
 
-    // Instantiate and start firehose
-    const firehoseServiceUrl = process.env.BLUESKY_FIREHOSE_URL || 'wss://bsky.network';
-    console.log(`Connecting to firehose service at: ${firehoseServiceUrl}`);
-    const firehose = new FirehoseSubscription(firehoseServiceUrl);
+        // Start the WebSocket server listeners (connection handled by wss.on('connection'))
+        wss.on('connection', handleWebSocketConnection); // Use the implemented handler
+        console.log('WebSocket server initialized and listening for connections.');
 
-    // Log throttling factor (even if 1)
-    console.log(`Processing 1 / ${THROTTLE_FACTOR} posts from firehose.`);
+        // Attach WebSocket upgrade handler to the HTTP server
+        server.on('upgrade', (request, socket, head) => {
+            // Basic check for WebSocket path (optional, adjust if needed)
+            if (request.url === '/ws' || !request.url) { // Allow root path or /ws
+                 wss.handleUpgrade(request, socket, head, (ws) => {
+                    wss.emit('connection', ws, request);
+                 });
+            } else {
+                 console.log(`Rejecting WebSocket upgrade request for ${request.url}`);
+                 socket.destroy();
+            }
+        });
 
-    // Start firehose subscription non-blocking, allowing the server to start listening.
-    // Pass `processPost` as the callback for handling individual posts.
-    firehose.subscribeToFirehose(processPost).catch((error: any) => {
-        console.error('Firehose subscription failed critically:', error);
-        // Consider reconnect logic here
-    });
+        // Start the HTTP server
+        const port = parseInt(process.env.PORT || '3000', 10);
+        server.listen(port, () => {
+            console.log(`HTTP server listening on port ${port}`);
+        });
 
-    // Start the HTTP server and listen for connections.
-    server.on('error', (error: NodeJS.ErrnoException) => {
-        console.error(`Server listening error: ${error.code} - ${error.message}`);
+        // Start the Firehose connection using the updated handler
+        console.log("Connecting to Bluesky Firehose...");
+        const firehoseService = process.env.BLUESKY_SERVICE_URL || 'wss://bsky.network';
+        console.log(`Using Firehose service URL: ${firehoseService}`);
+        const firehose = new FirehoseSubscription(firehoseService);
+        firehose.subscribeToFirehose(handleFirehoseRecord).catch(err => {
+            console.error("Firehose subscription failed critically:", err);
+        });
+        console.log("Firehose subscription process initiated.");
+
+        console.log("Application startup complete.");
+
+    } catch (error) {
+        console.error('FATAL Error starting the application:', error);
         process.exit(1);
-    });
-    server.listen(PORT, () => {
-        const address = server.address();
-        const bind = typeof address === 'string' ? `pipe ${address}` : `port ${address?.port}`;
-        console.log(`HTTP server listening on ${bind}`);
-        console.log(`Dashboard URL: http://localhost:${PORT}`);
-    });
+    }
 }
 
 // Run the main application function.
