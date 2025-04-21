@@ -1,45 +1,43 @@
 # Bluesky Real-time Sentiment Analysis Dashboard
 
-A real-time dashboard that monitors the Bluesky firehose, performs sentiment analysis on posts using the NRC Emotion Lexicon, aggregates the results, and displays sentiment trends over time.
+A real-time dashboard that monitors the Bluesky firehose, performs sentiment analysis on posts, aggregates the results, and displays sentiment trends over time.
 
 **Live Demo:** [https://bluesky-sentiment-analysis.fly.dev](https://bluesky-sentiment-analysis.fly.dev)
-
-*(Note: Data persistence is enabled via Fly Postgres. Requires `fly proxy` for local development against the live DB.)*
 
 ![Dashboard Screenshot](screenshot.png)
 
 ## Features
 
 *   Connects to the Bluesky Firehose via WebSockets.
-*   Filters for English language posts using `franc`.
-*   Performs sentiment analysis based on the NRC Emotion Lexicon for 8 core emotions + positive/negative.
-*   Aggregates scores into 10-second intervals.
+*   Filters posts by language using `franc`.
+*   Performs sentiment analysis based on the NRC Emotion Lexicon.
+*   Supports custom keyword-based filter signals.
+*   Aggregates scores into configurable intervals (default: 10 seconds).
 *   Real-time updates pushed to frontend clients via WebSockets (`ws`).
 *   Interactive dashboard built with HTML, CSS, and TypeScript (using Chart.js).
-*   Displays separate charts for 8 emotions and one combined Net Sentiment (Positive - Negative) chart.
-*   Shows both 5-minute and 1-hour moving averages for each metric.
-*   Allows selection of different time range views (15m to 1mo).
-*   Relative time labels on the x-axis (e.g., "2 hours ago", "Now").
-*   Data persistence using Fly Postgres.
+*   Displays separate charts for sentiment signals/MAs and post volume.
+*   Calculates and displays configurable short-term and long-term moving averages.
+*   Allows selection of different time range views.
+*   Data persistence using PostgreSQL.
 *   Deployed on Fly.io using Docker.
 
 ## Technology Stack
 
-*   **Backend:** Node.js, TypeScript, `ws` (WebSockets), `pg` (Postgres client)
+*   **Backend:** Node.js, TypeScript, `ws` (WebSockets), `pg` (Postgres client), `tsx`
 *   **Frontend:** HTML, CSS, TypeScript, Chart.js, Moment.js
 *   **Data:** Bluesky Firehose, NRC Emotion Lexicon
 *   **Libraries:** `@atproto/api`, `franc`, `esbuild`
-*   **Infrastructure:** Docker, Fly.io (App Hosting + Postgres)
+*   **Infrastructure:** Docker, Fly.io (optional deployment)
+*   **Package Manager:** `pnpm`
 
-## Local Development Setup
+## Local Development Setup (using Docker for PostgreSQL)
 
 **Prerequisites:**
 
-*   Node.js (Version specified in `Dockerfile`, e.g., 20.x)
-*   npm
-*   Fly CLI (`flyctl`)
-*   Access to the project's Fly.io organization (to run `fly proxy`)
-*   NRC Emotion Lexicon file (downloaded and placed as `data/NRC-Emotion-Lexicon-Wordlevel-v0.92.txt`)
+*   Node.js (v20.x recommended)
+*   `pnpm` (Install via `npm install -g pnpm`)
+*   Docker Desktop (or Docker Engine/CLI)
+*   NRC Emotion Lexicon file (see step 4)
 
 **Steps:**
 
@@ -53,29 +51,60 @@ A real-time dashboard that monitors the Bluesky firehose, performs sentiment ana
     npm install
     ```
 3.  **Set up Environment Variables:**
-    *   Create a `.env` file in the project root.
-    *   Obtain the application-specific database credentials (e.g., from the `fly postgres attach` command output or `fly secrets list`).
-    *   Add the `DATABASE_URL` to `.env`, pointing to `127.0.0.1:5432` (the proxy):
-        ```dotenv
-        # .env
-        DATABASE_URL=postgres://<USERNAME>:<PASSWORD>@127.0.0.1:5432/<DATABASE_NAME>?sslmode=disable
-        ```
-        *(Replace placeholders with actual credentials)*
-4.  **Start the Fly Proxy:**
-    *   In a **separate terminal**, run the proxy command (replace `bluesky-sentiment-db` if your DB app name is different):
+    *   Create a `.env` file in the project root by copying the example:
         ```bash
-        fly proxy 5432 -a bluesky-sentiment-db
+        cp .env.example .env
         ```
-    *   Keep this terminal running.
-5.  **Build the code:**
-    ```bash
-    npm run build
-    ```
-6.  **Run the server:**
-    ```bash
-    npm start
-    ```
-7.  Open your browser to `http://localhost:3000` (or the port configured in `src/server.ts`).
+    *   Review the variables in `.env`. The defaults should work for local Docker setup, but you might adjust `PORT` or Firehose URL if needed.
+
+4.  **Set up PostgreSQL with Docker:**
+    *   **Create a Docker volume** to persist database data:
+        ```bash
+        docker volume create bluesky-db-data
+        ```
+    *   **Run the PostgreSQL container:**
+        ```bash
+        docker run --name local-bluesky-db -e POSTGRES_PASSWORD=mysecretpassword -p 5432:5432 -v bluesky-db-data:/var/lib/postgresql/data -d postgres:15
+        ```
+        *   This starts a PostgreSQL 15 container named `local-bluesky-db`.
+        *   The superuser `postgres` will have the password `mysecretpassword`.
+        *   It maps port 5432 on your host to the container's port 5432.
+        *   It uses the `bluesky-db-data` volume.
+        *   Wait a few seconds for the database to initialize.
+    *   **(Optional) Find Container IP if `localhost` fails:** In some cases, another service on your machine might conflict with `localhost:5432`. If you encounter connection issues, find the container's IP:
+        ```bash
+        # macOS / Linux
+        docker inspect local-bluesky-db | grep IPAddress
+
+        # Windows (PowerShell)
+        docker inspect local-bluesky-db | Select-String IPAddress
+        ```
+        Then, update the `DATABASE_URL` in your `.env` file, replacing `localhost` with the container IP address (e.g., `postgres://postgres:mysecretpassword@172.17.0.2:5432/postgres`).
+
+5.  **Initialize the Database Schema:**
+    *   Run the main server **once** to create the necessary tables:
+        ```bash
+        npm start
+        ```
+    *   Watch the logs. Once you see messages like `Initializing database...` and `...table "sentiment_data" ensured`, `...index ensured`, etc., the schema is ready. Press `Ctrl+C` to stop the server.
+
+6.  **Ingest Lexicon Data:**
+    *   Run the ingestion script:
+        ```bash
+        npm run ingest-lexicon
+        ```
+    *   This should now succeed as the `lexicon_emotions` table exists.
+
+7.  **Build & Run Server:**
+    *   Build both backend and frontend code:
+        ```bash
+        npm run build
+        ```
+    *   Start the server:
+        ```bash
+        npm start
+        ```
+8.  Open your browser to `http://localhost:3000` (or the port configured in `.env`).
 
 ## Deployment
 
@@ -94,3 +123,7 @@ Contributions are welcome!
 Please see the [backlog.md](backlog.md) file for a list of planned features and tasks.
 
 Feel free to open issues or submit pull requests.
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
