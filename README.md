@@ -35,7 +35,6 @@ A real-time dashboard that monitors the Bluesky firehose, performs sentiment ana
 **Prerequisites:**
 
 *   Node.js (v20.x recommended)
-*   `pnpm` (Install via `npm install -g pnpm`)
 *   Docker Desktop (or Docker Engine/CLI)
 *   NRC Emotion Lexicon file (see step 4)
 
