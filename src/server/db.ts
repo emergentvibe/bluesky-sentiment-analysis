@@ -1,9 +1,10 @@
 import pg, { Pool, PoolClient, QueryResult } from 'pg';
 const { Pool: PgPool } = pg;
-import { MetricSignal, RawDbEntry, HistoryEntry, SentimentScores } from '../types.js';
+import { MetricSignal, RawDbEntry, HistoryEntry, SentimentScores, SentimentDataDbRow, AvgWindowState } from '../types.js';
 import { baseMetricKeysMap, currentEmotionKeys } from './state.js';
 import { DEFAULT_METRIC_KEYS } from './config.js';
 import { createEmptyScores, addScores } from './sentimentUtils.js';
+import { SHORT_AVG_WINDOW_POINTS, LONG_AVG_WINDOW_POINTS } from './config.js';
 
 // Validate that the DATABASE_URL environment variable is set.
 if (!process.env.DATABASE_URL) {
@@ -29,7 +30,57 @@ export async function initializeDatabase(): Promise<void> {
     let client: PoolClient | null = null;
     try {
         client = await pool.connect();
-        // ... (rest of initializeDatabase function remains the same)
+
+        // Ensure sentiment_data table exists with ALL required columns
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS sentiment_data (
+                timestamp TIMESTAMPTZ NOT NULL,
+                language VARCHAR(10) NOT NULL,
+                signal_name VARCHAR(100) NOT NULL DEFAULT 'default',
+                avg_scores JSONB NOT NULL,
+                post_count INTEGER NOT NULL,
+                short_avg JSONB NULL,
+                long_avg JSONB NULL
+            );
+        `);
+        console.log('Base table "sentiment_data" ensured.');
+
+        // Ensure signal_name, short_avg, long_avg columns exist
+        await client.query(`ALTER TABLE sentiment_data ADD COLUMN IF NOT EXISTS signal_name VARCHAR(100) NOT NULL DEFAULT 'default';`);
+        await client.query(`ALTER TABLE sentiment_data ADD COLUMN IF NOT EXISTS short_avg JSONB;`);
+        await client.query(`ALTER TABLE sentiment_data ADD COLUMN IF NOT EXISTS long_avg JSONB;`);
+        console.log('Columns signal_name, short_avg, long_avg ensured.');
+
+        // Ensure the primary key is (timestamp, language, signal_name)
+        try {
+            await client.query(`ALTER TABLE sentiment_data DROP CONSTRAINT IF EXISTS sentiment_data_pkey;`);
+            console.log('Dropped existing primary key constraint (if necessary).');
+        } catch (pkError: any) {
+            console.warn(`Could not drop primary key constraint (maybe non-existent): ${pkError.message}`);
+        }
+        try {
+             await client.query(`
+                 ALTER TABLE sentiment_data
+                 ADD CONSTRAINT sentiment_data_pkey PRIMARY KEY (timestamp, language, signal_name);
+             `);
+             console.log('Ensured primary key on (timestamp, language, signal_name).');
+        } catch (pkError: any) {
+             // Handle error if PK already exists (e.g., from a partial previous run)
+             if (pkError.code === '42P07') { // 42P07 = duplicate_table (PostgreSQL error code for duplicate object)
+                 console.log('Primary key constraint already exists.');
+             } else {
+                 console.error('Failed to add primary key:', pkError.message || pkError);
+                 throw pkError; // Rethrow if it's not a duplicate error
+             }
+        }
+        
+        // Ensure indexes exist
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_sentiment_data_timestamp ON sentiment_data (timestamp DESC);`);
+        console.log('Index "idx_sentiment_data_timestamp" ensured.');
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_sentiment_data_lang_signal ON sentiment_data (language, signal_name, timestamp DESC);`);
+        console.log('Index "idx_sentiment_data_lang_signal" ensured.');
+
+        // Complex Keyword Filters Table (ensure it exists)
         await client.query(`CREATE INDEX IF NOT EXISTS idx_complex_filters_active ON complex_keyword_filters (is_active);`);
         console.log('Index "idx_complex_filters_active" ensured.');
 
@@ -127,108 +178,136 @@ export async function loadDynamicSignalsFromDB(): Promise<MetricSignal[]> {
 }
 
 /**
- * Fetches and aggregates sentiment data from the database for specified languages and signal names.
+ * Fetches pre-aggregated 10-second sentiment data points from the database.
+ * No further aggregation or MA calculation is done here.
  */
 export async function fetchAndAggregateData(
     languages: string[],
     dbSignalNames: string[],
     startTime: Date,
     endTime: Date,
-    intervalMs: number
+    // intervalMs: number - No longer needed as we fetch raw stored points
 ): Promise<Map<string, HistoryEntry[]>> {
-    console.log(`[DB] fetchAndAggregateData called. Langs: [${languages.join(',')}], DB Signals: [${dbSignalNames.join(',')}], Start: ${startTime.toISOString()}, End: ${endTime.toISOString()}, Interval: ${intervalMs}ms`);
+    console.log(`[DB] Fetching stored data. Langs: [${languages.join(',')}], DB Signals: [${dbSignalNames.join(',')}], Start: ${startTime.toISOString()}, End: ${endTime.toISOString()}`);
     let client: PoolClient | null = null;
-    // Initialize maps
-    const buckets = new Map<string, Map<number, { scores: SentimentScores, postCount: number }>>();
     const finalResults = new Map<string, HistoryEntry[]>();
-    const keysToProcess = Array.from(baseMetricKeysMap.keys());
 
+    // Initialize results map
     dbSignalNames.forEach(signalName => {
          languages.forEach(langCode => {
              const key = `${signalName}_${langCode}`;
-             finalResults.set(key, []); // Initialize with empty array
-             buckets.set(key, new Map());
+             finalResults.set(key, []);
          });
     });
 
     try {
         client = await pool.connect();
-        const queryResult: QueryResult<RawDbEntry & { language: string, signal_name: string }> = await client.query(
-            `SELECT timestamp, language, signal_name, scores, post_count
+        // Fetch the stored rows including pre-calculated averages and MAs
+        const queryResult: QueryResult<SentimentDataDbRow> = await client.query(
+            // Select the correct columns
+            `SELECT timestamp, language, signal_name, avg_scores, post_count, short_avg, long_avg
              FROM sentiment_data
              WHERE language = ANY($1::text[])
                AND signal_name = ANY($2::text[])
-               AND timestamp BETWEEN $3 AND $4
+               AND timestamp >= $3 -- Use >= for start time
+               AND timestamp < $4  -- Use < for end time
              ORDER BY timestamp ASC`,
-            [languages, dbSignalNames, new Date(startTime.getTime() - intervalMs), new Date(endTime.getTime() + intervalMs)]
+             // Adjust time range slightly if necessary depending on how UI sends it
+            [languages, dbSignalNames, startTime, endTime]
         );
 
-        const rawData: (RawDbEntry & { language: string, signal_name: string })[] = queryResult.rows;
-        console.log(`[DB] Fetched ${rawData.length} raw rows for ${languages.length} langs and ${dbSignalNames.length} DB signals.`);
+        const rawData: SentimentDataDbRow[] = queryResult.rows;
+        console.log(`[DB] Fetched ${rawData.length} stored rows.`);
 
-        if (rawData.length === 0) {
-            console.log('[DB] No raw data found for the specified criteria.');
-            // Return the initialized map with empty arrays
-            // No need to release client here, finally block handles it
-        } else {
-            // Aggregate into buckets
+        if (rawData.length > 0) {
+            // Group results by signalLangKey
             rawData.forEach(row => {
                 const signalLangKey = `${row.signal_name}_${row.language}`;
-                const bucketTimestamp = Math.floor(new Date(row.timestamp).getTime() / intervalMs) * intervalMs;
-                const signalBuckets = buckets.get(signalLangKey);
-                if (!signalBuckets) {
-                    console.warn(`[DB Aggregation] Encountered unexpected signalLangKey: ${signalLangKey}. Skipping row.`);
-                    return;
+                const historyEntry: HistoryEntry = {
+                    timestamp: new Date(row.timestamp).getTime(), // Convert to number timestamp
+                    avgScores: row.avg_scores, // Already the average scores
+                    postCount: row.post_count,
+                    shortAvg: row.short_avg,   // Use stored short MA
+                    longAvg: row.long_avg     // Use stored long MA
+                };
+                
+                // Append to the correct list in the results map
+                if (finalResults.has(signalLangKey)) {
+                    finalResults.get(signalLangKey)?.push(historyEntry);
+                } else {
+                    // Should not happen due to pre-initialization, but safety check
+                    finalResults.set(signalLangKey, [historyEntry]); 
                 }
-                if (!signalBuckets.has(bucketTimestamp)) {
-                    signalBuckets.set(bucketTimestamp, { scores: createEmptyScores(), postCount: 0 });
-                }
-                const bucketData = signalBuckets.get(bucketTimestamp)!;
-                const lowerCaseDbScores: SentimentScores = {};
-                for(const key in row.scores) {
-                     if (Object.prototype.hasOwnProperty.call(row.scores, key)) {
-                          lowerCaseDbScores[key.toLowerCase()] = row.scores[key];
-                     }
-                }
-                addScores(bucketData.scores, lowerCaseDbScores);
-                const count = row.postCount ?? (row as any).post_count ?? 0;
-                bucketData.postCount += count;
             });
-
-            // Convert buckets to HistoryEntry arrays
-            buckets.forEach((signalBuckets, signalLangKey) => {
-                const aggregatedResults: HistoryEntry[] = [];
-                signalBuckets.forEach((bucketData, timestamp) => {
-                    if (timestamp < startTime.getTime() || timestamp >= endTime.getTime()) {
-                        return;
-                    }
-                    const avgScores = createEmptyScores();
-                    if (bucketData.postCount > 0) {
-                        keysToProcess.forEach(key => {
-                            if (Object.prototype.hasOwnProperty.call(bucketData.scores, key)) {
-                                avgScores[key] = bucketData.scores[key] / bucketData.postCount;
-                            }
-                        });
-                    }
-                    aggregatedResults.push({
-                        timestamp: timestamp,
-                        scores: avgScores,
-                        postCount: bucketData.postCount
-                    });
-                });
-                aggregatedResults.sort((a, b) => a.timestamp - b.timestamp);
-                finalResults.set(signalLangKey, aggregatedResults);
-            });
-            console.log(`[DB] Finished aggregation.`);
         }
+
     } catch (err: any) {
         console.error('[DB] Error in fetchAndAggregateData:', err.message || err);
-        // Return the initialized (potentially empty) map on error
     } finally {
         client?.release();
     }
-    // Ensure the function always returns the map
+
+    // Return the map, potentially with empty arrays for combinations with no data
     return finalResults;
+}
+
+/**
+ * Loads the most recent data points for each signal/language combination
+ * to initialize the moving average calculation state.
+ */
+export async function loadRecentMAStates(): Promise<Map<string, { short: AvgWindowState; long: AvgWindowState }>> {
+    console.log('[DB] Loading recent states for MA initialization...');
+    const maStates = new Map<string, { short: AvgWindowState; long: AvgWindowState }>();
+    let client: PoolClient | null = null;
+    const maxWindowPoints = Math.max(SHORT_AVG_WINDOW_POINTS, LONG_AVG_WINDOW_POINTS);
+
+    try {
+        client = await pool.connect();
+        const distinctPairsResult: QueryResult<{ signal_name: string; language: string }> = await client.query(
+            `SELECT DISTINCT signal_name, language FROM sentiment_data ORDER BY signal_name, language`
+        );
+        const distinctPairs = distinctPairsResult.rows;
+        console.log(`[DB] Found ${distinctPairs.length} distinct signal/language pairs for MA state loading.`);
+
+        for (const pair of distinctPairs) {
+            const { signal_name, language } = pair;
+            const signalLangKey = `${signal_name}_${language}`;
+
+            const recentDataResult: QueryResult<SentimentDataDbRow> = await client.query(
+                `SELECT timestamp, avg_scores
+                 FROM sentiment_data
+                 WHERE signal_name = $1 AND language = $2
+                 ORDER BY timestamp DESC
+                 LIMIT $3`,
+                [signal_name, language, maxWindowPoints]
+            );
+
+            const recentEntries = recentDataResult.rows.reverse(); // oldest first
+
+            if (recentEntries.length > 0) {
+                 const baseQueue: (SentimentScores | null)[] = recentEntries.map(row => row.avg_scores);
+                 const shortQueue = baseQueue.slice(-SHORT_AVG_WINDOW_POINTS);
+                 const longQueue = baseQueue.slice(-LONG_AVG_WINDOW_POINTS);
+                 maStates.set(signalLangKey, {
+                    short: { queue: shortQueue, windowPoints: SHORT_AVG_WINDOW_POINTS },
+                    long: { queue: longQueue, windowPoints: LONG_AVG_WINDOW_POINTS },
+                 });
+            } else {
+                 maStates.set(signalLangKey, {
+                    short: { queue: [], windowPoints: SHORT_AVG_WINDOW_POINTS },
+                    long: { queue: [], windowPoints: LONG_AVG_WINDOW_POINTS },
+                 });
+            }
+        }
+        console.log(`[DB] Finished loading ${maStates.size} MA states.`);
+
+    } catch (err: any) {
+        console.error('[DB] Error loading recent MA states:', err.message || err);
+        return new Map();
+    } finally {
+        client?.release();
+    }
+    return maStates;
 }
 
 // Function for storing aggregated data would go here (part of aggregateAndStore logic)

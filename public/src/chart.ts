@@ -36,7 +36,8 @@ import {
     ChartPoint,
     ServerHistoryPayload,
     ServerLiveUpdatePayload,
-    LiveUpdateEntry
+    LiveUpdateEntry,
+    LiveLangVolumeUpdateEntry
 } from './types.ts';
 import { loadingIndicator } from './dom.ts';
 import { getMetricValue } from './utils/metrics.ts';
@@ -330,7 +331,7 @@ export function handleHistoryData(payload: ServerHistoryPayload): void {
 
             historyPoints.forEach(point => {
                 const timestamp = point.timestamp;
-                const rawScore = getMetricValue(point.scores, config.metric);
+                const rawScore = getMetricValue(point.avgScores, config.metric);
                 const pointDataY = point.postCount === 0 && rawScore === null ? 0 : rawScore;
                 mainData.push({ x: timestamp, y: pointDataY });
                 shortAvgData.push({ x: timestamp, y: getMetricValue(point.shortAvg, config.metric) });
@@ -369,8 +370,8 @@ export function handleHistoryData(payload: ServerHistoryPayload): void {
          }
          const firstSignalForLang = plottedSignals.find(p => p.languageCode === langCode);
          const color = firstSignalForLang ? firstSignalForLang.color + '80' : '#CCCCCC';
-         if (volumeData.length > 0) updateDataset(chartInstances.volumeChart, `Volume (${langCode})`, volumeData, color);
-         else removeDataset(chartInstances.volumeChart, `Volume (${langCode})`);
+         const volumeLabel = `Volume (${langCode})`;
+         updateDataset(chartInstances.volumeChart, volumeLabel, volumeData, color);
     });
 
     const existingVolumeLabels = chartInstances.volumeChart?.data.datasets.map(ds => ds.label).filter(l => l?.startsWith('Volume (')) ?? [];
@@ -389,7 +390,11 @@ export function handleHistoryData(payload: ServerHistoryPayload): void {
  * Processes incoming live data points (`liveUpdate` message).
  */
 export function handleLiveUpdate(payload: ServerLiveUpdatePayload): void {
-    if (!payload || !Array.isArray(payload.updates) || payload.updates.length === 0) return;
+    // Check if payload or updates array exists
+    if (!payload || (!Array.isArray(payload.updates) && !Array.isArray(payload.langVolumes))) {
+        console.warn("Received live update with no updates or langVolumes.");
+        return;
+    }
 
     let chartNeedsUpdate = false;
     const chart = chartInstances.sentimentChart;
@@ -397,61 +402,62 @@ export function handleLiveUpdate(payload: ServerLiveUpdatePayload): void {
     if (!chart || !volumeChart) return;
 
     const bufferTime = Date.now() - (currentTimeWindowMs + (5 * MINUTE_MS));
-    const volumeUpdatesByLang = new Map<string, { timestamp: number, totalPostCount: number }>();
 
-    payload.updates.forEach(update => {
-        const { signalName, language: langCode, timestamp, postCount } = update;
-
-        const correspondingPlottedSignal = plottedSignals.find(p => p.metric === signalName && p.languageCode === langCode);
-
-        if (correspondingPlottedSignal) {
-            const rawLabel = `${signalName} (${langCode}) - Raw`;
-            const shortMALabel = `${signalName} (${langCode}) - Short MA`;
-            const longMALabel = `${signalName} (${langCode}) - Long MA`;
-
-            let rawDataset = chart.data.datasets.find(ds => ds.label === rawLabel);
-            let shortMADataset = chart.data.datasets.find(ds => ds.label === shortMALabel);
-            let longMADataset = chart.data.datasets.find(ds => ds.label === longMALabel);
-
-            let rawScoreValue = getMetricValue(update.scores, signalName);
-            if (rawScoreValue !== null && postCount > 0) rawScoreValue /= postCount;
-            else if (postCount === 0) rawScoreValue = 0;
-
-            const rawPoint: ChartPoint = { x: timestamp, y: rawScoreValue };
-            const shortMAPoint: ChartPoint = { x: timestamp, y: getMetricValue(update.shortAvg, signalName) };
-            const longMAPoint: ChartPoint = { x: timestamp, y: getMetricValue(update.longAvg, signalName) };
-
-            function pushAndFilter(dataset: ChartDataset<any, any> | undefined, point: ChartPoint) {
-                if (!dataset) return;
-                const dataArray = dataset.data as ChartPoint[];
-                dataArray.push(point);
-                dataset.data = dataArray.filter(p => p.x >= bufferTime);
-                chartNeedsUpdate = true;
+    // --- Process Per-Signal Updates (Sentiment/MA) --- 
+    if (payload.updates && payload.updates.length > 0) {
+        payload.updates.forEach(update => {
+            const { signalName, language: langCode, timestamp, postCount } = update;
+            const correspondingPlottedSignal = plottedSignals.find(p => p.metric === signalName && p.languageCode === langCode);
+    
+            if (correspondingPlottedSignal) {
+                // Find datasets
+                const rawLabel = `${signalName} (${langCode}) - Raw`;
+                const shortMALabel = `${signalName} (${langCode}) - Short MA`;
+                const longMALabel = `${signalName} (${langCode}) - Long MA`;
+                let rawDataset = chart.data.datasets.find(ds => ds.label === rawLabel);
+                let shortMADataset = chart.data.datasets.find(ds => ds.label === shortMALabel);
+                let longMADataset = chart.data.datasets.find(ds => ds.label === longMALabel);
+                // Prepare points
+                let rawScoreValue = getMetricValue(update.avgScores, signalName);
+                if (rawScoreValue === null && postCount === 0) rawScoreValue = 0; 
+                const rawPoint: ChartPoint = { x: timestamp, y: rawScoreValue };
+                const shortMAPoint: ChartPoint = { x: timestamp, y: getMetricValue(update.shortAvg, signalName) };
+                const longMAPoint: ChartPoint = { x: timestamp, y: getMetricValue(update.longAvg, signalName) };
+                // Push and filter function
+                function pushAndFilter(dataset: ChartDataset<any, any> | undefined, point: ChartPoint) {
+                    if (!dataset) return;
+                    const dataArray = dataset.data as ChartPoint[];
+                    dataArray.push(point);
+                    dataset.data = dataArray.filter(p => p.x >= bufferTime);
+                    chartNeedsUpdate = true;
+                }
+                // Apply updates
+                if (correspondingPlottedSignal.showRaw) pushAndFilter(rawDataset, rawPoint);
+                if (correspondingPlottedSignal.showShortMA) pushAndFilter(shortMADataset, shortMAPoint);
+                if (correspondingPlottedSignal.showLongMA) pushAndFilter(longMADataset, longMAPoint);
             }
+        });
+    }
 
-            if (correspondingPlottedSignal.showRaw) pushAndFilter(rawDataset, rawPoint);
-            if (correspondingPlottedSignal.showShortMA) pushAndFilter(shortMADataset, shortMAPoint);
-            if (correspondingPlottedSignal.showLongMA) pushAndFilter(longMADataset, longMAPoint);
-        }
-
-        if (!volumeUpdatesByLang.has(langCode)) volumeUpdatesByLang.set(langCode, { timestamp: timestamp, totalPostCount: 0 });
-        volumeUpdatesByLang.get(langCode)!.totalPostCount += postCount;
-    });
-
-    volumeUpdatesByLang.forEach((aggregatedVolumeData, langCode) => {
-        const volumeLabel = `Volume (${langCode})`;
-        const volumeDataset = volumeChart.data.datasets.find(ds => ds.label === volumeLabel);
-
-        if (volumeDataset) {
-            const volumePoint: ChartPoint = { x: aggregatedVolumeData.timestamp, y: aggregatedVolumeData.totalPostCount };
-            const dataArray = volumeDataset.data as ChartPoint[];
-            dataArray.push(volumePoint);
-            volumeDataset.data = dataArray.filter(p => p.x >= bufferTime);
-            chartNeedsUpdate = true;
-        } else {
-             console.warn(`[handleLiveUpdate] Volume dataset not found for label: ${volumeLabel}.`);
-        }
-    });
+    // --- Process Language Volume Updates --- 
+    if (payload.langVolumes && payload.langVolumes.length > 0) {
+        payload.langVolumes.forEach(volumeUpdate => {
+            const { language: langCode, timestamp, totalPostCount } = volumeUpdate;
+            const volumeLabel = `Volume (${langCode})`;
+            const volumeDataset = volumeChart.data.datasets.find(ds => ds.label === volumeLabel);
+    
+            if (volumeDataset) {
+                const volumePoint: ChartPoint = { x: timestamp, y: totalPostCount }; // Use totalPostCount directly
+                const dataArray = volumeDataset.data as ChartPoint[];
+                dataArray.push(volumePoint);
+                volumeDataset.data = dataArray.filter(p => p.x >= bufferTime);
+                chartNeedsUpdate = true;
+            } else {
+                 // This warning might still appear briefly if history hasn't created the dataset yet
+                 console.warn(`[handleLiveUpdate] Volume dataset not found for label: ${volumeLabel}.`);
+            }
+        });
+    }
 
     if (chartNeedsUpdate) {
         updateCharts();

@@ -1,4 +1,4 @@
-import { SentimentScores, WindowState, HistoryEntry } from '../types.js';
+import { SentimentScores, WindowState, HistoryEntry, AvgWindowState } from '../types.js';
 import { baseMetricKeysMap } from './state.js';
 
 /**
@@ -31,99 +31,103 @@ export function subtractScores(target: SentimentScores, source: SentimentScores)
     });
 }
 
-/** Updates incremental MA window state and returns new average. */
-export function updateIncrementalWindowState(state: WindowState, newEntry: HistoryEntry): SentimentScores | null {
-    if (!state.summedScores) state.summedScores = createEmptyScores();
-    if (newEntry.scores) {
-        addScores(state.summedScores, newEntry.scores);
+/**
+ * Calculates the simple moving average based on a queue of average scores.
+ * Does not use postCount for weighting.
+ */
+export function calculateAvgMAState(state: AvgWindowState, avgScores: SentimentScores | null): SentimentScores | null {
+    // Ensure queue is not null (initialize if first call)
+    if (!state.queue) {
+        state.queue = [];
     }
-    state.summedPostCount += newEntry.postCount;
-    state.queue.push(newEntry);
 
+    // Add the new average score entry to the queue
+    state.queue.push(avgScores);
+
+    // Remove oldest entry if queue exceeds window size
     if (state.queue.length > state.windowPoints) {
-        const oldEntry = state.queue.shift();
-        if (oldEntry?.scores) {
-             subtractScores(state.summedScores, oldEntry.scores);
-             state.summedPostCount -= oldEntry.postCount;
+        state.queue.shift();
+    }
+
+    // Calculate the simple average of the scores in the current window
+    let validEntriesCount = 0;
+    const currentWindowSum: SentimentScores = createEmptyScores();
+
+    for (const entry of state.queue) {
+        if (entry !== null) {
+            addScores(currentWindowSum, entry); // Sum the scores
+            validEntriesCount++;
         }
     }
 
-    if (state.queue.length > 0 && state.summedPostCount > 0) {
-        const avgScores = createEmptyScores();
+    if (validEntriesCount > 0) {
+        const finalAvgScores = createEmptyScores();
         baseMetricKeysMap.forEach((_, key) => {
-            if (Object.prototype.hasOwnProperty.call(state.summedScores, key)) {
-                 avgScores[key] = state.summedScores[key] / state.summedPostCount;
+            if (Object.prototype.hasOwnProperty.call(currentWindowSum, key)) {
+                finalAvgScores[key] = currentWindowSum[key] / validEntriesCount;
             }
         });
-        return avgScores;
+        return finalAvgScores;
     } else {
-        return null;
+        return null; // Return null if no valid entries in the window
     }
 }
 
-/**
- * Calculates moving averages for sentiment scores, weighted by post count.
- */
-export function calculateSentimentMovingAverage(data: HistoryEntry[], windowPoints: number): (SentimentScores | null)[] {
-     const result: (SentimentScores | null)[] = Array(data.length).fill(null);
-     const keysToAverage = Array.from(baseMetricKeysMap.keys());
-     const runningSums: SentimentScores = createEmptyScores();
-     let runningCount = 0;
-     const windowQueue: HistoryEntry[] = [];
+// --- Old functions likely no longer needed --- 
 
-     for (let i = 0; i < data.length; i++) {
-         const currentEntry = data[i];
-         if (currentEntry.scores) {
-            addScores(runningSums, currentEntry.scores);
-            runningCount += currentEntry.postCount;
-         }
-         windowQueue.push(currentEntry);
+/* // Commenting out - Weighted MA calculation based on total scores/counts
+export function updateIncrementalWindowState(state: WindowState, newEntry: HistoryEntry): SentimentScores | null {
+    if (!state.summedScores) state.summedScores = createEmptyScores();
+    // newEntry now uses avgScores, this function expects total scores
+    // Need to adapt or remove based on whether total scores are needed elsewhere
+    // For now, assume it's not needed for MA calculation path.
+    // Original logic:
+    // if (newEntry.scores) { 
+    //     addScores(state.summedScores, newEntry.scores); 
+    // }
+    // state.summedPostCount += newEntry.postCount;
+    // state.queue.push(newEntry);
 
-         if (windowQueue.length > windowPoints) {
-             const oldestEntry = windowQueue.shift();
-             if (oldestEntry?.scores) {
-                 subtractScores(runningSums, oldestEntry.scores);
-                 runningCount -= oldestEntry.postCount;
-             }
-         }
+    // if (state.queue.length > state.windowPoints) {
+    //     const oldEntry = state.queue.shift();
+    //     if (oldEntry?.scores) {
+    //          subtractScores(state.summedScores, oldEntry.scores);
+    //          state.summedPostCount -= oldEntry.postCount;
+    //     }
+    // }
 
-         if (runningCount > 0) {
-             const avgScores = createEmptyScores();
-             keysToAverage.forEach(key => {
-                 if (Object.prototype.hasOwnProperty.call(runningSums, key)) {
-                     avgScores[key] = runningSums[key] / runningCount;
-                 }
-             });
-             result[i] = avgScores;
-         } else {
-             result[i] = null;
-         }
-     }
-     return result;
+    // if (state.queue.length > 0 && state.summedPostCount > 0) {
+    //     const avgScores = createEmptyScores(); 
+    //     baseMetricKeysMap.forEach((_, key) => {
+    //         if (Object.prototype.hasOwnProperty.call(state.summedScores, key)) {
+    //              avgScores[key] = state.summedScores[key] / state.summedPostCount;
+    //         }
+    //     });
+    //     return avgScores;
+    // } else {
+    //     return null;
+    // }
+    console.warn("updateIncrementalWindowState (weighted MA) is likely deprecated and needs review/removal.");
+    return null; 
 }
+*/
 
-/**
- * Calculates MAs for aggregated data (Map keyed by dbSignalName_langCode).
- */
+/* // Commenting out - Weighted MA calculation over a batch
+export function calculateSentimentMovingAverage(data: HistoryEntry[], windowPoints: number): (SentimentScores | null)[] {
+     // This function expects data[i].scores to be total scores, not avgScores
+     console.warn("calculateSentimentMovingAverage (weighted MA batch) is likely deprecated and needs review/removal.");
+     return Array(data.length).fill(null);
+}
+*/
+
+/* // Removing - This was called by handleWebSocketConnection for historical data, no longer needed
 export function calculateMAsForAggregatedData(
-    aggregatedData: Map<string, HistoryEntry[]>, // Key: dbSignalName_langCode
+    aggregatedData: Map<string, HistoryEntry[]>,
     intervalMs: number,
     shortWindowMs: number,
     longWindowMs: number
-): Map<string, HistoryEntry[]> { // Returns map keyed by dbSignalName_langCode
-     console.log(`Calculating MAs (Short: ${shortWindowMs/60000}m, Long: ${longWindowMs/60000}m) for ${aggregatedData.size} signal/language combinations.`);
-    aggregatedData.forEach((signalLangData, signalLangKey) => {
-        if (signalLangData.length === 0) {
-             return;
-        }
-        const shortPoints = Math.max(1, Math.round(shortWindowMs / intervalMs));
-        const longPoints = Math.max(1, Math.round(longWindowMs / intervalMs));
-        const shortMA = calculateSentimentMovingAverage(signalLangData, shortPoints);
-        const longMA = calculateSentimentMovingAverage(signalLangData, longPoints);
-        for (let i = 0; i < signalLangData.length; i++) {
-            signalLangData[i].shortAvg = shortMA[i];
-            signalLangData[i].longAvg = longMA[i];
-        }
-    });
-    return aggregatedData;
-} 
+): Map<string, HistoryEntry[]> { 
+     console.warn("calculateMAsForAggregatedData is deprecated and removed.");
+    return aggregatedData; 
+}
+*/ 

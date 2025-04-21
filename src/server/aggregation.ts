@@ -1,103 +1,135 @@
 import { pool } from './db.js'; // Import DB pool
-import { LiveUpdateEntry, HistoryEntry, LiveUpdateMessage } from '../types.js';
-import { baseMetricKeysMap, currentIntervalScores, currentIntervalPostCount, liveMAState, recentHistoryBuffer } from './state.js';
+import { LiveUpdateEntry, HistoryEntry, LiveUpdateMessage, SentimentScores, AvgWindowState, LiveLangVolumeUpdateEntry, LiveUpdatePayload } from '../types.js';
+import { baseMetricKeysMap, currentIntervalScores, currentIntervalPostCount, liveAvgMAState, /* liveMAState, recentHistoryBuffer */ } from './state.js';
 import { LIVE_UPDATE_BUFFER_MS, SHORT_AVG_WINDOW_POINTS, LONG_AVG_WINDOW_POINTS } from './config.js';
-import { createEmptyScores, updateIncrementalWindowState } from './sentimentUtils.js';
+import { createEmptyScores, calculateAvgMAState /* updateIncrementalWindowState */ } from './sentimentUtils.js';
 import { broadcast } from './websocketServer.js';
 
 /**
- * Aggregates scores accumulated during the interval, stores them in the database,
- * calculates moving averages, updates buffers, and broadcasts live updates.
+ * Aggregates scores accumulated during the interval, calculates average scores per post,
+ * calculates MAs based on average scores, stores results in the database,
+ * calculates total volume per language, and broadcasts live updates.
  */
 export async function aggregateAndStore(): Promise<void> {
     const timestamp = new Date();
-    const bufferCutoffTime = timestamp.getTime() - LIVE_UPDATE_BUFFER_MS;
+    // bufferCutoffTime might not be needed if recentHistoryBuffer is removed/repurposed
+    // const bufferCutoffTime = timestamp.getTime() - LIVE_UPDATE_BUFFER_MS;
     let client = null;
     let liveUpdates: LiveUpdateEntry[] = [];
-    const updatedSignalLangKeys = new Set<string>();
+    // updatedSignalLangKeys might not be needed if recentHistoryBuffer is removed
+    // const updatedSignalLangKeys = new Set<string>();
+
+    const scoresToReset: typeof currentIntervalScores = {};
+    const countsToReset: typeof currentIntervalPostCount = {};
+    // Map to store total post count per language for this interval
+    const intervalTotalVolumeByLang: { [lang: string]: number } = {};
 
     try {
         client = await pool.connect();
         await client.query('BEGIN');
 
-        const scoresToReset: typeof currentIntervalScores = {};
-        const countsToReset: typeof currentIntervalPostCount = {};
-
         for (const langCode in currentIntervalScores) {
             if (!currentIntervalScores.hasOwnProperty(langCode)) continue;
-            scoresToReset[langCode] = {}; // Initialize inner object for reset
+            scoresToReset[langCode] = {};
             countsToReset[langCode] = {};
+            // Initialize language volume counter
+            if (intervalTotalVolumeByLang[langCode] === undefined) {
+                 intervalTotalVolumeByLang[langCode] = 0;
+            }
 
             for (const dbSignalName in currentIntervalScores[langCode]) {
                 if (!currentIntervalScores[langCode].hasOwnProperty(dbSignalName)) continue;
 
                 const accumulatedScores = currentIntervalScores[langCode][dbSignalName];
                 const postCount = currentIntervalPostCount[langCode][dbSignalName];
+                
+                // Accumulate total volume for the language
+                intervalTotalVolumeByLang[langCode] += postCount;
+
+                let avgScores: SentimentScores = createEmptyScores();
+                let shortAvg: SentimentScores | null = null;
+                let longAvg: SentimentScores | null = null;
 
                 if (postCount > 0) {
-                    const values = [timestamp, langCode, dbSignalName, JSON.stringify(accumulatedScores), postCount];
+                    // 1. Calculate Average Scores per Post for the interval
+                    // Overwrite avgScores with calculated values
+                    baseMetricKeysMap.forEach((_, key) => {
+                        if (Object.prototype.hasOwnProperty.call(accumulatedScores, key)) {
+                            avgScores[key] = accumulatedScores[key] / postCount;
+                        }
+                    });
+
+                    // 2. Calculate MAs based on Average Scores
+                    const signalLangKey = `${dbSignalName}_${langCode}`;
+                    if (!liveAvgMAState[signalLangKey]) {
+                        // Initialize state
+                        liveAvgMAState[signalLangKey] = { short: { queue: [], windowPoints: SHORT_AVG_WINDOW_POINTS }, long: { queue: [], windowPoints: LONG_AVG_WINDOW_POINTS } };
+                    }
+                    shortAvg = calculateAvgMAState(liveAvgMAState[signalLangKey].short, avgScores);
+                    longAvg = calculateAvgMAState(liveAvgMAState[signalLangKey].long, avgScores);
+
+                    // 3. Store in DB 
+                    const values = [ timestamp, langCode, dbSignalName, JSON.stringify(avgScores), postCount, shortAvg ? JSON.stringify(shortAvg) : null, longAvg ? JSON.stringify(longAvg) : null ];
                     await client.query(
-                        `INSERT INTO sentiment_data (timestamp, language, signal_name, scores, post_count)
-                         VALUES ($1, $2, $3, $4, $5)
+                        `INSERT INTO sentiment_data (timestamp, language, signal_name, avg_scores, post_count, short_avg, long_avg)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7)
                          ON CONFLICT (timestamp, language, signal_name) DO UPDATE SET
-                           scores = EXCLUDED.scores,
-                           post_count = EXCLUDED.post_count`,
+                           avg_scores = EXCLUDED.avg_scores,
+                           post_count = EXCLUDED.post_count,
+                           short_avg = EXCLUDED.short_avg,
+                           long_avg = EXCLUDED.long_avg`,
                         values
                     );
 
-                    const currentRawEntry: HistoryEntry = {
-                        timestamp: timestamp.getTime(),
-                        scores: accumulatedScores,
-                        postCount: postCount
-                    };
-
+                } else {
+                    // Handle 0 posts: avgScores is already initialized to 0s
                     const signalLangKey = `${dbSignalName}_${langCode}`;
-                    updatedSignalLangKeys.add(signalLangKey);
-
-                    if (!liveMAState[signalLangKey]) {
-                        liveMAState[signalLangKey] = {
-                            short: { queue: [], summedScores: createEmptyScores(), summedPostCount: 0, windowPoints: SHORT_AVG_WINDOW_POINTS },
-                            long: { queue: [], summedScores: createEmptyScores(), summedPostCount: 0, windowPoints: LONG_AVG_WINDOW_POINTS }
-                        };
+                    if (!liveAvgMAState[signalLangKey]) {
+                         // Initialize state
+                         liveAvgMAState[signalLangKey] = { short: { queue: [], windowPoints: SHORT_AVG_WINDOW_POINTS }, long: { queue: [], windowPoints: LONG_AVG_WINDOW_POINTS } };
                     }
-                     if (!recentHistoryBuffer[signalLangKey]) {
-                         recentHistoryBuffer[signalLangKey] = [];
-                     }
+                    // Update MAs using the 0 avgScores
+                    shortAvg = calculateAvgMAState(liveAvgMAState[signalLangKey].short, avgScores); 
+                    longAvg = calculateAvgMAState(liveAvgMAState[signalLangKey].long, avgScores); 
 
-                    const latestShortAvg = updateIncrementalWindowState(liveMAState[signalLangKey].short, currentRawEntry);
-                    const latestLongAvg = updateIncrementalWindowState(liveMAState[signalLangKey].long, currentRawEntry);
-
-                     const entryForBuffer = { ...currentRawEntry, shortAvg: latestShortAvg, longAvg: latestLongAvg };
-                    recentHistoryBuffer[signalLangKey].push(entryForBuffer);
-                    recentHistoryBuffer[signalLangKey] = recentHistoryBuffer[signalLangKey]
-                         .filter(entry => entry.timestamp >= bufferCutoffTime)
-                         .sort((a, b) => a.timestamp - b.timestamp);
-
-                    if (dbSignalName === 'default') {
-                         baseMetricKeysMap.forEach((_, metricKey) => {
-                            liveUpdates.push({
-                                signalName: metricKey,
-                                language: langCode,
-                                timestamp: currentRawEntry.timestamp,
-                                scores: currentRawEntry.scores,
-                                postCount: currentRawEntry.postCount,
-                                shortAvg: latestShortAvg,
-                                longAvg: latestLongAvg
-                            });
-                         });
-                    } else {
-                         liveUpdates.push({
-                            signalName: dbSignalName,
-                            language: langCode,
-                            timestamp: currentRawEntry.timestamp,
-                            scores: currentRawEntry.scores,
-                            postCount: currentRawEntry.postCount,
-                            shortAvg: latestShortAvg,
-                            longAvg: latestLongAvg
-                        });
-                    }
+                    // Store 0 posts / 0 avg score / resulting MAs
+                    const values = [ timestamp, langCode, dbSignalName, JSON.stringify(avgScores), postCount, shortAvg ? JSON.stringify(shortAvg) : null, longAvg ? JSON.stringify(longAvg) : null ];
+                    await client.query(
+                        `INSERT INTO sentiment_data (timestamp, language, signal_name, avg_scores, post_count, short_avg, long_avg)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7)
+                         ON CONFLICT (timestamp, language, signal_name) DO UPDATE SET
+                           avg_scores = EXCLUDED.avg_scores, post_count = EXCLUDED.post_count, short_avg = EXCLUDED.short_avg, long_avg = EXCLUDED.long_avg`,
+                        values
+                    );
                 }
-                // Mark for reset even if postCount was 0
+
+                // --- Prepare Live Update Payloads --- 
+                // avgScores is guaranteed non-null here
+                if (dbSignalName === 'default') {
+                    baseMetricKeysMap.forEach((_, metricKey) => {
+                        liveUpdates.push({
+                            signalName: metricKey,
+                            language: langCode,
+                            timestamp: timestamp.getTime(),
+                            avgScores: avgScores, // Send avg scores
+                            postCount: postCount,
+                            shortAvg: shortAvg,   // Send latest calculated short MA
+                            longAvg: longAvg    // Send latest calculated long MA
+                        });
+                    });
+                } else {
+                    liveUpdates.push({
+                        signalName: dbSignalName,
+                        language: langCode,
+                        timestamp: timestamp.getTime(),
+                        avgScores: avgScores,
+                        postCount: postCount,
+                        shortAvg: shortAvg,
+                        longAvg: longAvg
+                    });
+                }
+
+                // Mark accumulators for reset
                 scoresToReset[langCode][dbSignalName] = createEmptyScores();
                 countsToReset[langCode][dbSignalName] = 0;
             }
@@ -105,18 +137,34 @@ export async function aggregateAndStore(): Promise<void> {
 
         await client.query('COMMIT');
 
-        if (liveUpdates.length > 0) {
+        // --- Create Language Volume Updates --- 
+        const langVolumeUpdates: LiveLangVolumeUpdateEntry[] = [];
+        for (const langCode in intervalTotalVolumeByLang) {
+             if (intervalTotalVolumeByLang.hasOwnProperty(langCode)) {
+                 langVolumeUpdates.push({
+                     language: langCode,
+                     timestamp: timestamp.getTime(),
+                     totalPostCount: intervalTotalVolumeByLang[langCode]
+                 });
+             }
+        }
+
+        // --- Broadcast Live Updates (including langVolumes) --- 
+        if (liveUpdates.length > 0 || langVolumeUpdates.length > 0) { // Broadcast if there's either type of update
+            const payload: LiveUpdatePayload = {
+                updates: liveUpdates,
+                langVolumes: langVolumeUpdates
+            };
             const message: LiveUpdateMessage = {
                 type: 'liveUpdate',
-                payload: { updates: liveUpdates }
+                payload: payload
             };
             broadcast(message);
         }
 
-        // Reset Interval Accumulators safely by assigning new objects
+        // --- Reset Interval Accumulators --- 
         Object.assign(currentIntervalScores, scoresToReset);
         Object.assign(currentIntervalPostCount, countsToReset);
-        // Clear keys from the main objects that weren't processed (unlikely but safe)
         for (const lang in currentIntervalScores) {
             if (!scoresToReset[lang]) delete currentIntervalScores[lang];
         }
@@ -124,8 +172,7 @@ export async function aggregateAndStore(): Promise<void> {
             if (!countsToReset[lang]) delete currentIntervalPostCount[lang];
         }
 
-
-        // Prune Old Data
+        // --- Prune Old Data --- 
         const PRUNE_AGE_MS = 31 * 24 * 60 * 60 * 1000;
         const pruneTimestamp = new Date(Date.now() - PRUNE_AGE_MS);
         const pruneResult = await client.query('DELETE FROM sentiment_data WHERE timestamp < $1', [pruneTimestamp]);

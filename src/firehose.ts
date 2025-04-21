@@ -142,15 +142,18 @@ class FirehoseSubscription {
                                         setImmediate(() => {
                                             try {
                                                 // Ensure the object passed matches the CommitData interface from types.ts
-                                                const callbackCommitData: CommitData = {
-                                                    // Pass only fields defined in CommitData from types.ts
-                                                    repo: commit.repo,
-                                                    time: commit.time,
-                                                    // Remove fields not defined in CommitData if necessary
-                                                    // commit: commit, 
-                                                    // ops: commit.ops,
-                                                };
-                                                onPost(record as AppBskyFeedPost.Record, callbackCommitData);
+                                                // Check if the main commit object has seq and commit properties
+                                                if (commit && typeof commit.seq === 'number' && commit.commit) { 
+                                                    const callbackCommitData: CommitData = {
+                                                        seq: commit.seq, // Add seq
+                                                        repo: commit.repo,
+                                                        commit: commit.commit, // Add commit CID
+                                                        time: commit.time,
+                                                    };
+                                                    onPost(record as AppBskyFeedPost.Record, callbackCommitData);
+                                                } else {
+                                                    console.warn('Skipping post processing due to missing seq or commit CID in firehose message.');
+                                                }
                                             } catch (postProcessingError) {
                                                 console.error('Error during async post processing:', postProcessingError);
                                             }

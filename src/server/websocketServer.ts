@@ -4,7 +4,6 @@ import http from 'http';
 import { ClientMessage, HistoryDataMessage, HistoryEntry, LiveUpdateMessage } from '../types.js';
 import { baseMetricKeysMap } from './state.js';
 import { fetchAndAggregateData } from './db.js';
-import { calculateMAsForAggregatedData } from './sentimentUtils.js';
 import { SHORT_AVG_WINDOW_POINTS, LONG_AVG_WINDOW_POINTS } from './config.js';
 // ... rest of file ...
 
@@ -45,7 +44,6 @@ async function handleWebSocketConnection(ws: WebSocket): Promise<void> {
                     return;
                 }
 
-                // Calculate time range
                 const endTime = new Date();
                 const startTime = new Date(endTime.getTime() - timeWindowMs);
 
@@ -63,11 +61,10 @@ async function handleWebSocketConnection(ws: WebSocket): Promise<void> {
 
                 console.log(`Handling requestHistory for signals [${signalNames.join(',')}] (DB: [${dbQuerySignalsArray.join(',')}]) & langs [${languages.join(',')}]`);
 
-                // Fetch and process data
-                const aggregatedData = await fetchAndAggregateData(languages, dbQuerySignalsArray, startTime, endTime, desiredIntervalMs);
-                const dataWithMAs = calculateMAsForAggregatedData(aggregatedData, desiredIntervalMs, SHORT_AVG_WINDOW_POINTS, LONG_AVG_WINDOW_POINTS);
+                // Fetch pre-calculated data (no interval needed)
+                const fetchedData = await fetchAndAggregateData(languages, dbQuerySignalsArray, startTime, endTime);
 
-                // Format response payload
+                // Format response payload directly from fetched data
                 const signalLangDataPayload: { [signalLangKey: string]: HistoryEntry[] } = {};
                 signalNames.forEach(reqSignalName => {
                     const lowerSignalName = reqSignalName.toLowerCase();
@@ -75,7 +72,7 @@ async function handleWebSocketConnection(ws: WebSocket): Promise<void> {
                     languages.forEach(langCode => {
                         const requestedKey = `${reqSignalName}_${langCode}`;
                         const dbDataKey = `${dbSignalName}_${langCode}`;
-                        signalLangDataPayload[requestedKey] = dataWithMAs.get(dbDataKey) || [];
+                        signalLangDataPayload[requestedKey] = fetchedData.get(dbDataKey) || [];
                     });
                 });
 

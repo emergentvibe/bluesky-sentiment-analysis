@@ -2,35 +2,43 @@
  * Defines the structure for sentiment scores (count per category).
  * Uses a dynamic record type to handle any number of emotions.
  */
-export type SentimentScores = Record<string, number>;
+export interface SentimentScores {
+    [key: string]: number; // Represents scores for different emotions/sentiments
+}
 
 /**
  * Base structure for aggregated data stored or processed.
  */
 export interface AggregatedScoreEntry {
-    timestamp: number | Date; // Allow both for flexibility (DB vs buffer)
+    timestamp: number;
+    language: string;
+    signalName: string; // Added
     scores: SentimentScores;
     postCount: number;
-    language?: string; // Optional: Useful for maps keyed by language
 }
 
 /**
  * Structure for historical data points, including moving averages.
  * Extends AggregatedScoreEntry, specifying timestamp as number and adding MAs.
  */
-export interface HistoryEntry extends Omit<AggregatedScoreEntry, 'timestamp' | 'language'> {
-    timestamp: number; // Use number for consistency in history/live updates
-    shortAvg?: SentimentScores | null; // Now uses dynamic SentimentScores type
-    longAvg?: SentimentScores | null; // Now uses dynamic SentimentScores type
+export interface HistoryEntry {
+    timestamp: number;       // Unix timestamp (ms)
+    // Rename scores to avgScores to reflect it's the average per post for the interval
+    avgScores: SentimentScores | null; // Average scores per post for the interval
+    postCount: number;       // Total posts in the interval
+    // Add optional pre-calculated MAs
+    shortAvg?: SentimentScores | null; // Optional short-term moving average
+    longAvg?: SentimentScores | null;  // Optional long-term moving average
 }
 
 /**
  * Structure representing a raw row fetched from the `sentiment_data` database table.
  * Extends AggregatedScoreEntry, specifying timestamp as Date.
  */
-export interface RawDbEntry extends Omit<AggregatedScoreEntry, 'timestamp'> {
-    timestamp: Date; // Comes from DB as Date
-    language: string; // Language is required in DB
+export interface RawDbEntry {
+    timestamp: string | Date;
+    scores: SentimentScores;
+    postCount: number;
 }
 
 /**
@@ -38,13 +46,13 @@ export interface RawDbEntry extends Omit<AggregatedScoreEntry, 'timestamp'> {
  * Contains data for a specific signal and language.
  */
 export interface LiveUpdateEntry {
-    signalName: string; // Which metric or filter this update is for
+    signalName: string;      // Specific metric or filter name
     language: string;
-    timestamp: number; // Use number timestamp
-    scores: SentimentScores; // Now uses dynamic SentimentScores type
-    postCount: number;
-    shortAvg?: SentimentScores | null; // Optional MAs (might not apply to filters)
-    longAvg?: SentimentScores | null;
+    timestamp: number;
+    avgScores: SentimentScores | null; // Average scores for the interval
+    postCount: number;       // Posts in the interval
+    shortAvg: SentimentScores | null; // Latest calculated short MA
+    longAvg: SentimentScores | null;  // Latest calculated long MA
 }
 
 /**
@@ -52,19 +60,18 @@ export interface LiveUpdateEntry {
  * Aligns with the `complex_keyword_filters` database table.
  */
 export interface MetricSignal {
-    id: number; // Or string if using UUIDs
-    name: string;
-    description?: string | null;
-    keywords_json: string | object; // Store as string from DB, parse as needed
-    is_active: boolean;
-    type: 'metric' | 'filter'; // Added type discriminator
-    // Add other relevant fields if needed
+    id: number | string; // number for filter (DB ID), string for base metric name
+    name: string;       // Name used for identification and display
+    keywords_json?: { include?: string[], exclude?: string[] }; // For filters
+    description?: string;
+    is_active?: boolean;
+    type: 'metric' | 'filter'; // Type identifier
 }
 
 /** State required for calculating a moving average incrementally. */
 export interface WindowState {
-    queue: HistoryEntry[];
-    summedScores: SentimentScores; // Now uses dynamic SentimentScores type
+    queue: HistoryEntry[]; // HistoryEntry now uses avgScores
+    summedScores: SentimentScores | null;
     summedPostCount: number;
     windowPoints: number;
 }
@@ -74,11 +81,12 @@ export interface WindowState {
  * Adjust based on the actual data provided by firehose.ts getOpsByType or callback.
  */
 export interface CommitData {
+    // Define structure based on what you extract or need from the commit event
+    seq: number;
     repo: string;
-    time: string; // Or Date?
-    // Include other relevant fields from the original commit if needed by processPost
-    // commit: any; // The raw commit object if necessary
-    // ops: any[]; // Parsed operations if necessary
+    commit: any; // Replace 'any' with actual commit CID type if available
+    time: string;
+    // Add other relevant fields like ops, blocks etc. if needed
 }
 
 /**
@@ -86,7 +94,7 @@ export interface CommitData {
  * Used by the frontend to populate the signal selection UI.
  */
 export interface AvailableSignal {
-    id: number | string; // ID from DB (for filters) or name (for default metrics)
+    id: number | string; // Match MetricSignal id type
     name: string;
     type: 'metric' | 'filter';
 }
@@ -100,13 +108,13 @@ export interface WebSocketMessage {
 }
 
 /** Message from client requesting historical data. */
-export interface RequestHistoryMessage extends WebSocketMessage {
+export interface RequestHistoryMessage {
     type: 'requestHistory';
     payload: {
         languages: string[];
         timeWindowMs: number;
         desiredIntervalMs: number;
-        signalNames: string[]; // Names of metrics/filters to fetch
+        signalNames: string[];
     };
 }
 
@@ -119,22 +127,62 @@ export interface HistoryDataMessage extends WebSocketMessage {
     };
 }
 
-/** Message from server containing live data updates. */
-export interface LiveUpdateMessage extends WebSocketMessage {
-    type: 'liveUpdate';
-    payload: {
-        updates: LiveUpdateEntry[]; // Array of updates for various signals/langs
-    };
-}
-
 /** Message from server indicating an error. */
 export interface ErrorMessage extends WebSocketMessage {
     type: 'error';
     payload: string; // Error description
 }
 
-/** Type alias for messages the client can send. */
-export type ClientMessage = RequestHistoryMessage; // Add other client message types if any
+// Add a general ClientMessage interface back
+export interface ClientMessage {
+    type: string;
+    payload?: any; 
+}
 
-/** Type alias for messages the server can send. */
-export type ServerMessage = HistoryDataMessage | LiveUpdateMessage | ErrorMessage; // Add other server message types 
+export type ClientDataType = RequestHistoryMessage | { type: 'ping' }; // Example
+
+// For database rows (matches new schema)
+export interface SentimentDataDbRow {
+    timestamp: Date; // Or string depending on pg driver
+    language: string;
+    signal_name: string;
+    avg_scores: SentimentScores;
+    post_count: number;
+    short_avg: SentimentScores | null;
+    long_avg: SentimentScores | null;
+}
+
+// State for calculating simple moving average of average scores
+export interface AvgWindowState {
+    queue: (SentimentScores | null)[]; // Queue of past average scores
+    windowPoints: number;
+    // Optional: summedAvgScores might be useful if needed for optimization, but simple queue is fine
+}
+
+export interface HistoryDataPayload {
+    signalLangData: { [signalLangKey: string]: HistoryEntry[] };
+}
+
+export interface HistoryDataMessage {
+    type: 'historyData';
+    payload: HistoryDataPayload;
+}
+
+// Added: Structure for total volume update per language
+export interface LiveLangVolumeUpdateEntry {
+    language: string;
+    timestamp: number;       // Unix timestamp (ms)
+    totalPostCount: number;  // Total posts for this language in the interval
+}
+
+// Updated: LiveUpdatePayload includes optional language volumes
+export interface LiveUpdatePayload {
+  updates: LiveUpdateEntry[]; // Per-signal updates (avgScores, MAs, etc.)
+  langVolumes?: LiveLangVolumeUpdateEntry[]; // Optional: Total volume per language
+}
+
+// Corrected LiveUpdateMessage definition (ensure it extends WebSocketMessage)
+export interface LiveUpdateMessage extends WebSocketMessage {
+  type: 'liveUpdate';
+  payload: LiveUpdatePayload;
+} 
