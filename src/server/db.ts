@@ -102,7 +102,7 @@ export async function initializeDatabase(): Promise<void> {
         // lexicon_languages
         await client.query(`
             CREATE TABLE IF NOT EXISTS lexicon_languages (
-                language_code VARCHAR(10) PRIMARY KEY,
+                language_code VARCHAR(50) PRIMARY KEY,
                 language_name VARCHAR(100) NOT NULL
             );
         `);
@@ -123,7 +123,7 @@ export async function initializeDatabase(): Promise<void> {
             CREATE TABLE IF NOT EXISTS lexicon_words (
                 word_id SERIAL PRIMARY KEY,
                 word_text TEXT NOT NULL,
-                language_code VARCHAR(10) NOT NULL REFERENCES lexicon_languages(language_code) ON DELETE CASCADE
+                language_code VARCHAR(50) NOT NULL REFERENCES lexicon_languages(language_code) ON DELETE CASCADE
             );
         `);
         // Add unique constraint separately to handle IF NOT EXISTS cleanly
