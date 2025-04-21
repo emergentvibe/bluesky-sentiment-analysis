@@ -199,18 +199,24 @@ export function updateCharts() {
 
 /**
  * Adds or updates a dataset in a given chart instance.
+ * - isMA: Indicates if this is a Moving Average dataset (controls dashing, fill, point size)
  */
 export function updateDataset(
     chart: Chart<'line' | 'bar', ChartPoint[]> | null,
     label: string,
     data: ChartPoint[],
     color: string,
-    isDashed: boolean = false,
     isMA: boolean = false
 ): void {
     if (!chart || !chart.data) return;
 
     const existingDatasetIndex = chart.data.datasets.findIndex(ds => ds.label === label);
+
+    // --- Determine Line Style based on Label/Type --- 
+    const isRaw = !isMA;
+    // Infer short/long MA status from label (could be passed as another param if needed)
+    const isShortMA = isMA && label.includes('Short MA');
+    const isLongMA = isMA && label.includes('Long MA');
 
     const baseDatasetConfig: Partial<ChartDataset<'line' | 'bar', ChartPoint[]>> = {
         label: label,
@@ -222,15 +228,19 @@ export function updateDataset(
 
     if (chart.config.type === 'line') {
         specificConfig = {
-            backgroundColor: color + '30',
-            borderWidth: isMA ? 1.5 : 2,
-            pointRadius: isMA ? 0 : 1,
-            pointHoverRadius: isMA ? 0 : 3,
+            // Remove background fill for all lines
+            backgroundColor: 'transparent', 
+            // Set border width based on type
+            borderWidth: isRaw ? 1.5 : (isShortMA ? 2 : (isLongMA ? 2.5 : 2)), // Raw=thin, ShortMA=medium, LongMA=thicker
+            pointRadius: isRaw ? 1 : 0, // Only show points for raw data
+            pointHoverRadius: isRaw ? 3 : 0,
             tension: 0.1,
-            borderDash: isDashed ? [5, 5] : undefined,
-            fill: !isMA,
+            // Set borderDash based on raw vs MA
+            borderDash: isRaw ? [5, 5] : undefined, // Dashed for Raw, Solid for MAs
+            fill: false, // Explicitly disable fill for all lines
         };
     } else if (chart.config.type === 'bar') {
+        // Keep bar chart styling as is
         specificConfig = {
             backgroundColor: color,
             borderWidth: 1,
@@ -338,9 +348,9 @@ export function handleHistoryData(payload: ServerHistoryPayload): void {
                 longAvgData.push({ x: timestamp, y: getMetricValue(point.longAvg, config.metric) });
             });
 
-            if (config.showRaw) updateDataset(chartInstances.sentimentChart, `${config.metric} (${config.languageCode}) - Raw`, mainData, config.color);
-            if (config.showShortMA) updateDataset(chartInstances.sentimentChart, `${config.metric} (${config.languageCode}) - Short MA`, shortAvgData, config.color, true, true);
-            if (config.showLongMA) updateDataset(chartInstances.sentimentChart, `${config.metric} (${config.languageCode}) - Long MA`, longAvgData, config.color, true, true);
+            if (config.showRaw) updateDataset(chartInstances.sentimentChart, `${config.metric} (${config.languageCode}) - Raw`, mainData, config.color, false);
+            if (config.showShortMA) updateDataset(chartInstances.sentimentChart, `${config.metric} (${config.languageCode}) - Short MA`, shortAvgData, config.color, true);
+            if (config.showLongMA) updateDataset(chartInstances.sentimentChart, `${config.metric} (${config.languageCode}) - Long MA`, longAvgData, config.color, true);
         } else {
             removeDataset(chartInstances.sentimentChart, `${config.metric} (${config.languageCode}) - Raw`);
             removeDataset(chartInstances.sentimentChart, `${config.metric} (${config.languageCode}) - Short MA`);
@@ -453,8 +463,8 @@ export function handleLiveUpdate(payload: ServerLiveUpdatePayload): void {
                 volumeDataset.data = dataArray.filter(p => p.x >= bufferTime);
                 chartNeedsUpdate = true;
             } else {
-                 // This warning might still appear briefly if history hasn't created the dataset yet
-                 console.warn(`[handleLiveUpdate] Volume dataset not found for label: ${volumeLabel}.`);
+                 // Comment out the warning as it's expected if the language isn't being plotted
+                 // console.warn(`[handleLiveUpdate] Volume dataset not found for label: ${volumeLabel}.`);
             }
         });
     }
