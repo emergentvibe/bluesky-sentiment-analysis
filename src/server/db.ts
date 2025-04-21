@@ -81,6 +81,18 @@ export async function initializeDatabase(): Promise<void> {
         console.log('Index "idx_sentiment_data_lang_signal" ensured.');
 
         // Complex Keyword Filters Table (ensure it exists)
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS complex_keyword_filters (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(100) UNIQUE NOT NULL,
+                description TEXT,
+                keywords_json JSONB NOT NULL, -- Store keywords as JSON { "include": [...], "exclude": [...] }
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+        console.log('Table "complex_keyword_filters" ensured.');
         await client.query(`CREATE INDEX IF NOT EXISTS idx_complex_filters_active ON complex_keyword_filters (is_active);`);
         console.log('Index "idx_complex_filters_active" ensured.');
 
