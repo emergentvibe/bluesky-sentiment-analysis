@@ -96,6 +96,75 @@ export async function initializeDatabase(): Promise<void> {
         await client.query(`CREATE INDEX IF NOT EXISTS idx_complex_filters_active ON complex_keyword_filters (is_active);`);
         console.log('Index "idx_complex_filters_active" ensured.');
 
+        // --- Lexicon Tables --- Ensure they exist ---
+        console.log('Ensuring Lexicon tables exist...');
+
+        // lexicon_languages
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS lexicon_languages (
+                language_code VARCHAR(10) PRIMARY KEY,
+                language_name VARCHAR(100) NOT NULL
+            );
+        `);
+        console.log('  Table "lexicon_languages" ensured.');
+
+        // lexicon_emotions
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS lexicon_emotions (
+                emotion_id SERIAL PRIMARY KEY,
+                emotion_name VARCHAR(100) UNIQUE NOT NULL,
+                is_base_nrc BOOLEAN DEFAULT FALSE
+            );
+        `);
+        console.log('  Table "lexicon_emotions" ensured.');
+
+        // lexicon_words (Depends on lexicon_languages)
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS lexicon_words (
+                word_id SERIAL PRIMARY KEY,
+                word_text TEXT NOT NULL,
+                language_code VARCHAR(10) NOT NULL REFERENCES lexicon_languages(language_code) ON DELETE CASCADE
+            );
+        `);
+        // Add unique constraint separately to handle IF NOT EXISTS cleanly
+        try {
+            await client.query(`ALTER TABLE lexicon_words ADD CONSTRAINT lexicon_words_text_lang_unique UNIQUE (word_text, language_code);`);
+            console.log('  Constraint "lexicon_words_text_lang_unique" added.');
+        } catch (constraintError: any) {
+            if (constraintError.code === '42P07') { // constraint already exists
+                console.log('  Constraint "lexicon_words_text_lang_unique" already exists.');
+            } else {
+                throw constraintError; // Re-throw other errors
+            }
+        }
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_lexicon_words_lang_text ON lexicon_words (language_code, word_text);`);
+        console.log('  Table "lexicon_words" and indexes ensured.');
+
+        // word_emotion_associations (Depends on lexicon_words and lexicon_emotions)
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS word_emotion_associations (
+                association_id SERIAL PRIMARY KEY,
+                word_id INTEGER NOT NULL REFERENCES lexicon_words(word_id) ON DELETE CASCADE,
+                emotion_id INTEGER NOT NULL REFERENCES lexicon_emotions(emotion_id) ON DELETE CASCADE
+            );
+        `);
+        // Add unique constraint separately
+        try {
+            await client.query(`ALTER TABLE word_emotion_associations ADD CONSTRAINT word_emotion_assoc_unique UNIQUE (word_id, emotion_id);`);
+            console.log('  Constraint "word_emotion_assoc_unique" added.');
+        } catch (constraintError: any) {
+            if (constraintError.code === '42P07') {
+                console.log('  Constraint "word_emotion_assoc_unique" already exists.');
+            } else {
+                throw constraintError;
+            }
+        }
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_word_emotion_assoc_word ON word_emotion_associations (word_id);`);
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_word_emotion_assoc_emotion ON word_emotion_associations (emotion_id);`);
+        console.log('  Table "word_emotion_associations" and indexes ensured.');
+
+        console.log('Lexicon tables ensured.');
+
     } catch (err: any) {
         console.error('Database initialization failed:', err.message || err);
         process.exit(1);
