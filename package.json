@@ -20,6 +20,7 @@
   "description": "",
   "devDependencies": {
     "@types/chart.js": "^2.9.41",
+    "@types/express": "^5.0.1",
     "@types/mime-types": "^2.1.4",
     "@types/node": "^22.14.1",
     "@types/ws": "^8.18.1",
