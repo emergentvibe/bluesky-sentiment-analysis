@@ -23,7 +23,8 @@ import {
     TickOptions,
     TitleOptions,
     TimeScaleOptions,
-    CartesianScaleOptions
+    CartesianScaleOptions,
+    ChartData
 } from 'chart.js';
 import 'chartjs-adapter-moment'; // Import the adapter
 import moment from 'moment'; // Import moment
@@ -37,13 +38,35 @@ import {
     ServerHistoryPayload,
     ServerLiveUpdatePayload,
     LiveUpdateEntry,
-    LiveLangVolumeUpdateEntry
+    LiveLangVolumeUpdateEntry,
+    PlottedSignalConfig
 } from './types.ts';
 import { loadingIndicator } from './dom.ts';
-import { getMetricValue } from './utils/metrics.ts';
 
 // Register necessary components (Could potentially be moved to main app.ts if needed elsewhere)
 // Chart.register(...registerables); // Keep commented out here unless chart.js is ONLY used in this module
+
+// --- Add getMetricValue directly here with logging ---
+/**
+ * Safely retrieves a numeric metric value from a SentimentScores object.
+ * Returns null if the key is not found or the value is not a number.
+ */
+export function getMetricValue(scores: SentimentScores | null | undefined, key: string | null): number | null {
+    // Log entry and parameters
+    // console.log(`[getMetricValue] Called with key: ${key}, scores: ${scores ? Object.keys(scores).join(', ') : 'null/undefined'}`);
+
+    if (!scores || typeof scores !== 'object' || key === null) {
+        // console.log(`[getMetricValue] Returning null (invalid scores or key)`);
+        return null;
+    }
+    const value = scores[key];
+    if (typeof value === 'number' && !isNaN(value)) {
+         // console.log(`[getMetricValue] Found numeric value for key '${key}': ${value}`);
+        return value;
+    }
+    // console.log(`[getMetricValue] Returning null (key '${key}' not found or value is not a number: ${value})`);
+    return null;
+}
 
 // --- Chart Initialization and Utils ---
 
@@ -55,7 +78,7 @@ function createTimeAxisOptions(): TimeScaleOptions {
         type: 'time',
         adapters: {
             date: {
-                locale: moment.locale()
+                // locale: moment.locale() // Might not be needed if Chart.js handles locale implicitly
             }
         },
         time: {
@@ -65,18 +88,51 @@ function createTimeAxisOptions(): TimeScaleOptions {
                 minute: 'HH:mm',
                 hour: 'MMM D, HH:mm',
                 day: 'MMM D'
-            }
+            },
+            // Add potentially missing properties based on Chart.js types/defaults
+            parser: 'auto', // Or specify your timestamp format if needed
+            round: false, // or 'minute', 'hour', etc.
+            isoWeekday: false, // Added missing property
+            minUnit: 'millisecond' // Added missing property
         },
         title: {
             display: true,
-            text: 'Time'
-        } as Partial<TitleOptions>,
+            text: 'Time',
+            align: 'center',
+            // Add potentially missing properties based on Chart.js types/defaults
+            color: '#666', // Default or your preferred color
+            font: { // FontSpec object
+                size: 12
+            },
+            padding: 10 // Added missing property (default or adjust as needed)
+        },
         ticks: {
+            // Remove previously added properties, rely on defaults where possible
+            // display: true,
+            // color: '#666',
+            // padding: 3,
+            // font: { size: 10 },
+            // Specify only necessary customizations
             source: 'auto',
             maxRotation: 0,
             autoSkip: true,
-            callback: function (this: TimeScale, value: any, index: number, ticks: any[]): string | null {
-                const timestamp = typeof value === 'number' ? value : this.getPixelForTick(index);
+            callback: function (this: Scale<CoreScaleOptions>, value: number | string, index: number, ticks: any[]): string | null {
+                // Attempt to get timestamp; value might be label (string) or numeric value
+                let timestamp: number | null = null;
+                if (typeof value === 'number') {
+                    timestamp = value;
+                } else if (typeof value === 'string' && this.chart?.data?.labels?.[index]) {
+                    // If value is a string label, try parsing it via moment if needed, or get from scale
+                    // Here, we assume the scale provides the numeric value correctly via getPixelForTick
+                    // If labels are used directly, parsing logic might be needed here.
+                    // For a time scale, the value passed to the callback is usually the numeric timestamp.
+                    // Let's rely on getPixelForTick if value isn't numeric, though it might be less direct.
+                    // A safer approach might be to access the actual tick object if available.
+                    timestamp = this.getPixelForValue(ticks[index]?.value);
+                }
+
+                if (timestamp === null) return String(value); // Fallback if timestamp cannot be determined
+
                 const now = Date.now();
                 const diffMinutes = (now - timestamp) / MINUTE_MS;
                 const diffHours = diffMinutes / 60;
@@ -87,7 +143,7 @@ function createTimeAxisOptions(): TimeScaleOptions {
                 if (diffHours < 24) return `-${Math.round(diffHours)}h`;
                 return `-${Math.round(diffDays)}d`;
             }
-        } as Partial<TickOptions>
+        }
     };
     return timeAxisOptions;
 }
@@ -123,9 +179,10 @@ export function initializeCharts() {
     // --- Initialize Main Chart (Line) ---
     if (mainCtx) {
         try {
+            // Use ChartData type for data property
             const lineChartConfig: ChartConfiguration<'line', ChartPoint[]> = {
                 type: 'line',
-                data: { datasets: [] as ChartDataset<'line', ChartPoint[]>[] },
+                data: { datasets: [] as ChartDataset<'line', ChartPoint[]>[] }, // Explicitly type datasets array
                 options: {
                     ...commonOptions,
                     scales: {
@@ -138,6 +195,7 @@ export function initializeCharts() {
                     }
                 }
             };
+            // Type the chart instance more generally, Chart.js handles specifics
             chartInstances.sentimentChart = new Chart(mainCtx, lineChartConfig);
             console.log("Main chart instance created.");
         } catch (error) {
@@ -151,9 +209,10 @@ export function initializeCharts() {
     // --- Initialize Volume Chart (Bar) ---
     if (volumeCtx) {
          try {
+             // Use ChartData type for data property
              const barChartConfig: ChartConfiguration<'bar', ChartPoint[]> = {
                 type: 'bar',
-                data: { datasets: [] as ChartDataset<'bar', ChartPoint[]>[] },
+                data: { datasets: [] as ChartDataset<'bar', ChartPoint[]>[] }, // Explicitly type datasets array
                 options: {
                     ...commonOptions,
                      scales: {
@@ -166,6 +225,7 @@ export function initializeCharts() {
                     },
                 }
             };
+             // Type the chart instance more generally
             chartInstances.volumeChart = new Chart(volumeCtx, barChartConfig);
             console.log("Volume chart instance created.");
          } catch (error) {
@@ -202,7 +262,7 @@ export function updateCharts() {
  * - isMA: Indicates if this is a Moving Average dataset (controls dashing, fill, point size)
  */
 export function updateDataset(
-    chart: Chart<'line' | 'bar', ChartPoint[]> | null,
+    chart: Chart | null, // Use the base Chart type
     label: string,
     data: ChartPoint[],
     color: string,
@@ -211,10 +271,7 @@ export function updateDataset(
     if (!chart || !chart.data) return;
 
     const existingDatasetIndex = chart.data.datasets.findIndex(ds => ds.label === label);
-
-    // --- Determine Line Style based on Label/Type --- 
     const isRaw = !isMA;
-    // Infer short/long MA status from label (could be passed as another param if needed)
     const isShortMA = isMA && label.includes('Short MA');
     const isLongMA = isMA && label.includes('Long MA');
 
@@ -226,21 +283,17 @@ export function updateDataset(
 
     let specificConfig: Partial<ChartDataset<'line', ChartPoint[]>> | Partial<ChartDataset<'bar', ChartPoint[]>>;
 
-    if (chart.config.type === 'line') {
+    if (chart === chartInstances.sentimentChart) {
         specificConfig = {
-            // Remove background fill for all lines
-            backgroundColor: 'transparent', 
-            // Set border width based on type
-            borderWidth: isRaw ? 1.5 : (isShortMA ? 2 : (isLongMA ? 2.5 : 2)), // Raw=thin, ShortMA=medium, LongMA=thicker
-            pointRadius: isRaw ? 1 : 0, // Only show points for raw data
+            backgroundColor: 'transparent',
+            borderWidth: isRaw ? 1.5 : (isShortMA ? 2 : (isLongMA ? 2.5 : 2)),
+            pointRadius: isRaw ? 1 : 0,
             pointHoverRadius: isRaw ? 3 : 0,
             tension: 0.1,
-            // Set borderDash based on raw vs MA
-            borderDash: isRaw ? [5, 5] : undefined, // Dashed for Raw, Solid for MAs
-            fill: false, // Explicitly disable fill for all lines
+            borderDash: isRaw ? [5, 5] : undefined,
+            fill: false,
         };
-    } else if (chart.config.type === 'bar') {
-        // Keep bar chart styling as is
+    } else if (chart === chartInstances.volumeChart) {
         specificConfig = {
             backgroundColor: color,
             borderWidth: 1,
@@ -248,7 +301,7 @@ export function updateDataset(
             categoryPercentage: 0.85,
         };
     } else {
-        console.warn(`updateDataset called on unsupported chart type: ${chart.config.type}`);
+        console.warn(`updateDataset called on unknown chart instance`);
         return;
     }
 
@@ -262,9 +315,9 @@ export function updateDataset(
 }
 
 /**
- * Removes a dataset from a chart by its label.
+ * Removes a dataset from a given chart instance based on its label.
  */
-export function removeDataset(chart: Chart<'line' | 'bar', ChartPoint[]> | null, label: string): void {
+export function removeDataset(chart: Chart | null, label: string): void { // Use base Chart type
     if (!chart || !chart.data) return;
     const datasetIndex = chart.data.datasets.findIndex(ds => ds.label === label);
     if (datasetIndex > -1) {
@@ -272,44 +325,63 @@ export function removeDataset(chart: Chart<'line' | 'bar', ChartPoint[]> | null,
     }
 }
 
-/** Helper function to clear all datasets from charts */
+/** Clears all data from both sentiment and volume charts. */
 export function clearAllChartData(): void {
-    if (chartInstances.sentimentChart?.data) {
-        chartInstances.sentimentChart.data.datasets = [];
-    }
-    if (chartInstances.volumeChart?.data) {
-        chartInstances.volumeChart.data.datasets = [];
-    }
+    console.log("[clearAllChartData] Clearing all chart data.");
+    // Iterate using Object.entries. Explicit cast removed as type should now match.
+    Object.entries(plottedSignals).forEach(([signalId, config]) => {
+        console.log(`[clearAllChartData] Clearing data for signal: ${config.label} (ID: ${signalId})`);
+        removeDataset(chartInstances.sentimentChart, config.label);
+        removeDataset(chartInstances.sentimentChart, `${config.label} Short MA`);
+        removeDataset(chartInstances.sentimentChart, `${config.label} Long MA`);
+        // Also remove language-specific volume datasets
+        Object.keys(config.langData || {}).forEach(lang => {
+            removeDataset(chartInstances.volumeChart, `${config.label} (${lang})`);
+        });
+    });
+    // Ensure datasets arrays are truly empty after removals
+    if (chartInstances.sentimentChart?.data) chartInstances.sentimentChart.data.datasets = [];
+    if (chartInstances.volumeChart?.data) chartInstances.volumeChart.data.datasets = [];
+
+    updateCharts(); // Update to reflect cleared state
 }
 
 /**
- * Sorts the datasets in the volume chart by total volume.
+ * Sorts the datasets in the volume chart alphabetically by language within each signal.
  */
 export function sortVolumeDatasets(chart: Chart<'bar', ChartPoint[]> | null) {
-    if (!chart || chart !== chartInstances.volumeChart || !chart.data?.datasets) {
-        return;
-    }
+    if (!chart || !chart.data?.datasets) return;
 
-    const now = Date.now();
-    const minTime = now - currentTimeWindowMs;
+    // Example label format: "Signal Name (en)"
+    chart.data.datasets.sort((a, b) => {
+        const labelA = a.label || '';
+        const labelB = b.label || '';
 
-    const volumeMap = new Map<ChartDataset<'bar', ChartPoint[]>, number>();
+        // Extract signal name and language
+        const matchA = labelA.match(/^(.*?)\s*\(([^)]+)\)$/);
+        const matchB = labelB.match(/^(.*?)\s*\(([^)]+)\)$/);
 
-    chart.data.datasets.forEach((dataset: ChartDataset<'bar', ChartPoint[]>) => {
-        let totalVolume = 0;
-        if (Array.isArray(dataset.data)) {
-            totalVolume = dataset.data
-                .filter(point => point && typeof point === 'object' && point.x >= minTime && point.y !== null)
-                .reduce((sum: number, point) => sum + (point.y || 0), 0);
-        }
-        volumeMap.set(dataset, totalVolume);
+        const signalA = matchA ? matchA[1].trim() : labelA;
+        const langA = matchA ? matchA[2] : '';
+        const signalB = matchB ? matchB[1].trim() : labelB;
+        const langB = matchB ? matchB[2] : '';
+
+        // Primary sort by signal name
+        if (signalA < signalB) return -1;
+        if (signalA > signalB) return 1;
+
+        // Secondary sort by language
+        if (langA < langB) return -1;
+        if (langA > langB) return 1;
+
+        return 0;
     });
 
-    chart.data.datasets.sort((a, b) => (volumeMap.get(b) ?? 0) - (volumeMap.get(a) ?? 0));
+    chart.update('none');
 }
 
 
-// --- Data Handlers --- (Moved from websocket.ts or app.ts)
+// --- Data Handlers ---
 
 /**
  * Handles the initial batch of historical data received from the server.
@@ -326,13 +398,64 @@ export function handleHistoryData(payload: ServerHistoryPayload): void {
     }
 
     const { signalLangData } = payload;
+    // Log received keys
+    console.log(`[handleHistoryData] Received signalLangData keys: ${Object.keys(signalLangData).join(', ')}`);
+
     clearAllChartData();
     const plottedLangs = new Set<string>();
 
     plottedSignals.forEach(config => {
-        const signalKey = `${config.metric}_${config.languageCode}`;
+        const signalKey = `${config.signalName}_${config.languageCode}`;
         const historyPoints = signalLangData[signalKey];
-        plottedLangs.add(config.languageCode);
+        plottedLangs.add(config.languageCode); // Add lang regardless of data presence for volume calc later
+
+        console.log(`[handleHistoryData] Processing signal: ${signalKey}, Type: ${config.type}`);
+
+        // --- Determine Metric Key ---
+        let metricKeyForValue: string | null = config.signalName; // Default
+        if (config.type === 'filter' && historyPoints && historyPoints.length > 0) {
+            // Try to find the key from the first valid 'scores' object
+            let foundKey = false;
+            for (const point of historyPoints) {
+                if (point.scores && typeof point.scores === 'object' && Object.keys(point.scores).length > 0) {
+                    const scoreKeys = Object.keys(point.scores);
+                    if (scoreKeys.length === 1) {
+                        metricKeyForValue = scoreKeys[0];
+                        console.log(`[handleHistoryData] Filter signal '${config.signalName}': Using single score key '${metricKeyForValue}' from historical data.`);
+                        foundKey = true;
+                        break; // Found the key
+                    } else if (scoreKeys.length > 1) {
+                        // If multiple keys, maybe one matches the signal name convention (e.g., filter name uses base metric)
+                        // This is heuristic - might need refinement based on actual backend behavior
+                        const baseMetricGuess = scoreKeys.find(k => config.signalName.toLowerCase().includes(k.toLowerCase()));
+                        if (baseMetricGuess) {
+                             metricKeyForValue = baseMetricGuess;
+                             console.warn(`[handleHistoryData] Filter signal '${config.signalName}': Multiple score keys (${scoreKeys.join(', ')}). Guessed base metric: '${metricKeyForValue}'.`);
+                             foundKey = true;
+                             break;
+                        } else {
+                            console.warn(`[handleHistoryData] Filter signal '${config.signalName}': Multiple score keys (${scoreKeys.join(', ')}), but couldn't guess base metric. Defaulting to signal name '${metricKeyForValue}'. Data might be incorrect.`);
+                            // Keep default metricKeyForValue = config.signalName
+                            foundKey = true; // Treat as found to avoid falling through
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!foundKey) {
+                 console.warn(`[handleHistoryData] Filter signal '${config.signalName}': Could not find any scores object in history to determine the metric key. Defaulting to signal name '${metricKeyForValue}'.`);
+            }
+        } else if (config.type !== 'filter') {
+             console.log(`[handleHistoryData] Regular signal '${config.signalName}': Using signal name as metric key.`);
+             metricKeyForValue = config.signalName;
+        } else {
+            // Filter signal but no history points
+             console.log(`[handleHistoryData] Filter signal '${config.signalName}': No history points found. Cannot determine specific metric key yet.`);
+             // Keep default metricKeyForValue = config.signalName, it might be set by live updates later if needed
+        }
+        console.log(`[handleHistoryData] Final metric key for ${signalKey}: ${metricKeyForValue}`);
+        // --- End Determine Metric Key ---
+
 
         if (historyPoints && historyPoints.length > 0) {
             const mainData: ChartPoint[] = [];
@@ -341,58 +464,106 @@ export function handleHistoryData(payload: ServerHistoryPayload): void {
 
             historyPoints.forEach(point => {
                 const timestamp = point.timestamp;
-                const rawScore = getMetricValue(point.avgScores, config.metric);
-                const pointDataY = point.postCount === 0 && rawScore === null ? 0 : rawScore;
+                // Use the determined metricKeyForValue
+                const rawScore = getMetricValue(point.scores, metricKeyForValue);
+                const pointDataY = point.postCount === 0 && rawScore === null ? 0 : rawScore; // Keep zero-filling for missing data if postCount is also 0
                 mainData.push({ x: timestamp, y: pointDataY });
-                shortAvgData.push({ x: timestamp, y: getMetricValue(point.shortAvg, config.metric) });
-                longAvgData.push({ x: timestamp, y: getMetricValue(point.longAvg, config.metric) });
+                // MAs should also use the determined key
+                shortAvgData.push({ x: timestamp, y: getMetricValue(point.shortAvg, metricKeyForValue) });
+                longAvgData.push({ x: timestamp, y: getMetricValue(point.longAvg, metricKeyForValue) });
             });
 
-            if (config.showRaw) updateDataset(chartInstances.sentimentChart, `${config.metric} (${config.languageCode}) - Raw`, mainData, config.color, false);
-            if (config.showShortMA) updateDataset(chartInstances.sentimentChart, `${config.metric} (${config.languageCode}) - Short MA`, shortAvgData, config.color, true);
-            if (config.showLongMA) updateDataset(chartInstances.sentimentChart, `${config.metric} (${config.languageCode}) - Long MA`, longAvgData, config.color, true);
+            const baseLabel = `${config.signalName} (${config.languageCode})`;
+
+            // Original logging for raw data presence
+            console.log(`[handleHistoryData] Updating raw dataset: ${baseLabel} - Raw`);
+            if (mainData.length > 0) {
+                 const firstValid = mainData.find(p => p.y !== null);
+                 const lastValid = [...mainData].reverse().find(p => p.y !== null);
+                 console.log(`[handleHistoryData] Raw data points: ${mainData.length}. First valid: x=${firstValid?.x}, y=${firstValid?.y}. Last valid: x=${lastValid?.x}, y=${lastValid?.y}`);
+                 // console.log(`[handleHistoryData] Sample raw data point: x=${mainData[0].x}, y=${mainData[0].y}`);
+                 // if (mainData.length > 1) {
+                 //     console.log(`[handleHistoryData] Last raw data point: x=${mainData[mainData.length - 1].x}, y=${mainData[mainData.length - 1].y}`);
+                 // }
+            } else {
+                 console.log(`[handleHistoryData] No data points for raw dataset: ${baseLabel} - Raw`);
+            }
+            console.log(`[handleHistoryData] ShowRaw flag: ${config.showRaw}`);
+
+
+            if (config.showRaw) updateDataset(chartInstances.sentimentChart, `${baseLabel} - Raw`, mainData, config.color, false);
+            if (config.showShortMA) updateDataset(chartInstances.sentimentChart, `${baseLabel} - Short MA`, shortAvgData, config.color, true);
+            if (config.showLongMA) updateDataset(chartInstances.sentimentChart, `${baseLabel} - Long MA`, longAvgData, config.color, true);
         } else {
-            removeDataset(chartInstances.sentimentChart, `${config.metric} (${config.languageCode}) - Raw`);
-            removeDataset(chartInstances.sentimentChart, `${config.metric} (${config.languageCode}) - Short MA`);
-            removeDataset(chartInstances.sentimentChart, `${config.metric} (${config.languageCode}) - Long MA`);
+            console.log(`[handleHistoryData] No history points found for ${signalKey}. Removing datasets.`);
+            const baseLabel = `${config.signalName} (${config.languageCode})`;
+            removeDataset(chartInstances.sentimentChart, `${baseLabel} - Raw`);
+            removeDataset(chartInstances.sentimentChart, `${baseLabel} - Short MA`);
+            removeDataset(chartInstances.sentimentChart, `${baseLabel} - Long MA`);
         }
     });
 
+    // --- Volume Calculation ---
     const uniqueLangs = Array.from(plottedLangs);
+    console.log(`[handleHistoryData] Calculating volume for plotted languages: ${uniqueLangs.join(', ')}`);
+
     uniqueLangs.forEach(langCode => {
+         console.log(`[handleHistoryData] Processing volume for language: ${langCode}`);
          const volumeData: ChartPoint[] = [];
-         const relevantKeys = Object.keys(signalLangData).filter(key => key.endsWith(`_${langCode}`));
-         if (relevantKeys.length > 0) {
-             const firstKey = relevantKeys[0];
+         // Find ALL keys from the *original* payload that end with this language code
+         const relevantServerKeys = Object.keys(signalLangData).filter(key => key.endsWith(`_${langCode}`));
+         console.log(`[handleHistoryData] Relevant keys from server for ${langCode} volume: ${relevantServerKeys.join(', ')}`);
+
+         if (relevantServerKeys.length > 0) {
+             const firstKey = relevantServerKeys[0];
              const numPoints = signalLangData[firstKey]?.length || 0;
+             console.log(`[handleHistoryData] ${langCode}: Found ${numPoints} time points based on key ${firstKey}`);
+
              for (let i = 0; i < numPoints; i++) {
                  let totalPostCount = 0;
                  let timestamp = 0;
-                 relevantKeys.forEach(key => {
+                 // Sum post counts across ALL relevant server keys for this timestamp index
+                 relevantServerKeys.forEach(key => {
                       const point = signalLangData[key]?.[i];
                       if (point) {
                           totalPostCount += point.postCount;
-                          if (timestamp === 0) timestamp = point.timestamp;
+                          if (timestamp === 0) timestamp = point.timestamp; // Assume timestamps align
                       }
                  });
-                 if (timestamp !== 0) volumeData.push({ x: timestamp, y: totalPostCount });
+                 if (timestamp !== 0) {
+                     volumeData.push({ x: timestamp, y: totalPostCount });
+                 } else {
+                     // This shouldn't happen if numPoints > 0 and data exists
+                     console.warn(`[handleHistoryData] ${langCode}: Timestamp was 0 at index ${i}, skipping point.`);
+                 }
              }
+         } else {
+             console.log(`[handleHistoryData] ${langCode}: No relevant server keys found for volume calculation.`);
          }
+
          const firstSignalForLang = plottedSignals.find(p => p.languageCode === langCode);
-         const color = firstSignalForLang ? firstSignalForLang.color + '80' : '#CCCCCC';
+         const color = firstSignalForLang ? firstSignalForLang.color + '80' : '#CCCCCC'; // Use color from the *first* signal added for that lang
          const volumeLabel = `Volume (${langCode})`;
+         console.log(`[handleHistoryData] Updating/Adding volume dataset: ${volumeLabel} with ${volumeData.length} points.`);
          updateDataset(chartInstances.volumeChart, volumeLabel, volumeData, color);
     });
 
+    // Remove volume datasets for languages that are no longer in plottedLangs
     const existingVolumeLabels = chartInstances.volumeChart?.data.datasets.map(ds => ds.label).filter(l => l?.startsWith('Volume (')) ?? [];
+    console.log(`[handleHistoryData] Existing volume labels: ${existingVolumeLabels.join(', ')}`);
     existingVolumeLabels.forEach(label => {
         const langCodeMatch = label?.match(/Volume \((.*)\)/);
         const langCode = langCodeMatch ? langCodeMatch[1] : null;
-        if (label && langCode && !uniqueLangs.includes(langCode)) removeDataset(chartInstances.volumeChart, label);
+        if (label && langCode && !uniqueLangs.includes(langCode)) {
+            console.log(`[handleHistoryData] Removing volume dataset for unplotted language: ${label}`);
+            removeDataset(chartInstances.volumeChart, label);
+        }
     });
+    // --- End Volume Calculation ---
 
     sortVolumeDatasets(chartInstances.volumeChart);
     updateCharts();
+    console.log('[handleHistoryData] Finished processing.');
 }
 
 
@@ -400,9 +571,8 @@ export function handleHistoryData(payload: ServerHistoryPayload): void {
  * Processes incoming live data points (`liveUpdate` message).
  */
 export function handleLiveUpdate(payload: ServerLiveUpdatePayload): void {
-    // Check if payload or updates array exists
     if (!payload || (!Array.isArray(payload.updates) && !Array.isArray(payload.langVolumes))) {
-        console.warn("Received live update with no updates or langVolumes.");
+        // console.warn("Received live update with no updates or langVolumes."); // Reduce noise
         return;
     }
 
@@ -413,63 +583,156 @@ export function handleLiveUpdate(payload: ServerLiveUpdatePayload): void {
 
     const bufferTime = Date.now() - (currentTimeWindowMs + (5 * MINUTE_MS));
 
-    // --- Process Per-Signal Updates (Sentiment/MA) --- 
+    // --- Process Per-Signal Updates (Sentiment/MA) ---
     if (payload.updates && payload.updates.length > 0) {
         payload.updates.forEach(update => {
             const { signalName, language: langCode, timestamp, postCount } = update;
-            const correspondingPlottedSignal = plottedSignals.find(p => p.metric === signalName && p.languageCode === langCode);
-    
+            const correspondingPlottedSignal = plottedSignals.find(p => p.signalName === signalName && p.languageCode === langCode);
+
             if (correspondingPlottedSignal) {
-                // Find datasets
-                const rawLabel = `${signalName} (${langCode}) - Raw`;
-                const shortMALabel = `${signalName} (${langCode}) - Short MA`;
-                const longMALabel = `${signalName} (${langCode}) - Long MA`;
+                // --- Determine Metric Key for Live Update ---
+                let metricKeyForValue: string | null = signalName; // Default
+                if (correspondingPlottedSignal.type === 'filter' && update.scores) {
+                     const scoreKeys = Object.keys(update.scores);
+                     if (scoreKeys.length === 1) {
+                         metricKeyForValue = scoreKeys[0];
+                         // console.log(`[handleLiveUpdate] Filter signal '${signalName}': Using single score key '${metricKeyForValue}'`);
+                     } else if (scoreKeys.length > 1) {
+                         const baseMetricGuess = scoreKeys.find(k => signalName.toLowerCase().includes(k.toLowerCase()));
+                         if (baseMetricGuess) {
+                              metricKeyForValue = baseMetricGuess;
+                              // console.warn(`[handleLiveUpdate] Filter signal '${signalName}': Multiple score keys (${scoreKeys.join(', ')}). Guessed base metric: '${metricKeyForValue}'.`);
+                         } else {
+                             // console.warn(`[handleLiveUpdate] Filter signal '${signalName}': Multiple score keys (${scoreKeys.join(', ')}), cannot guess base metric. Defaulting to signal name '${metricKeyForValue}'.`);
+                             metricKeyForValue = signalName; // Fallback
+                         }
+                     } else {
+                         // console.warn(`[handleLiveUpdate] Filter signal '${signalName}': Scores object is empty. Defaulting to signal name '${metricKeyForValue}'.`);
+                         metricKeyForValue = signalName; // Fallback
+                     }
+                } else if (correspondingPlottedSignal.type !== 'filter') {
+                    // console.log(`[handleLiveUpdate] Regular signal '${signalName}': Using signal name as metric key.`);
+                    metricKeyForValue = signalName;
+                } else {
+                    // Filter signal but no scores in this update? Unlikely but handle.
+                    // console.warn(`[handleLiveUpdate] Filter signal '${signalName}': No scores object in this update. Defaulting to signal name '${metricKeyForValue}'.`);
+                    metricKeyForValue = signalName; // Fallback
+                }
+                // console.log(`[handleLiveUpdate] Final metric key for ${signalName} (${langCode}): ${metricKeyForValue}`);
+                // --- End Determine Metric Key ---
+
+
+                const baseLabel = `${signalName} (${langCode})`;
+                const rawLabel = `${baseLabel} - Raw`;
+                const shortMALabel = `${baseLabel} - Short MA`;
+                const longMALabel = `${baseLabel} - Long MA`;
                 let rawDataset = chart.data.datasets.find(ds => ds.label === rawLabel);
                 let shortMADataset = chart.data.datasets.find(ds => ds.label === shortMALabel);
                 let longMADataset = chart.data.datasets.find(ds => ds.label === longMALabel);
-                // Prepare points
-                let rawScoreValue = getMetricValue(update.avgScores, signalName);
-                if (rawScoreValue === null && postCount === 0) rawScoreValue = 0; 
+
+                // Use determined key
+                let rawScoreValue = getMetricValue(update.scores, metricKeyForValue);
+                if (rawScoreValue === null && postCount === 0) rawScoreValue = 0; // Keep zero-filling
                 const rawPoint: ChartPoint = { x: timestamp, y: rawScoreValue };
-                const shortMAPoint: ChartPoint = { x: timestamp, y: getMetricValue(update.shortAvg, signalName) };
-                const longMAPoint: ChartPoint = { x: timestamp, y: getMetricValue(update.longAvg, signalName) };
-                // Push and filter function
+                // MAs should also use the determined key
+                const shortMAPoint: ChartPoint = { x: timestamp, y: getMetricValue(update.shortAvg, metricKeyForValue) };
+                const longMAPoint: ChartPoint = { x: timestamp, y: getMetricValue(update.longAvg, metricKeyForValue) };
+
                 function pushAndFilter(dataset: ChartDataset<any, any> | undefined, point: ChartPoint) {
-                    if (!dataset) return;
+                    if (!dataset || !dataset.data) return; // Add null check for dataset.data
                     const dataArray = dataset.data as ChartPoint[];
+                    // Avoid pushing duplicates if timestamp is identical (can happen with rapid updates)
+                    if (dataArray.length > 0 && dataArray[dataArray.length - 1].x === point.x) {
+                        // Optional: Update last point instead? Or just skip? Skipping for now.
+                        // console.log(`[pushAndFilter] Skipping duplicate timestamp ${point.x} for ${dataset.label}`);
+                        return;
+                    }
                     dataArray.push(point);
-                    dataset.data = dataArray.filter(p => p.x >= bufferTime);
+                    // Filter points older than the buffer time
+                    dataset.data = dataArray.filter(p => typeof p === 'object' && p !== null && typeof p.x === 'number' && p.x >= bufferTime);
                     chartNeedsUpdate = true;
                 }
-                // Apply updates
-                if (correspondingPlottedSignal.showRaw) pushAndFilter(rawDataset, rawPoint);
-                if (correspondingPlottedSignal.showShortMA) pushAndFilter(shortMADataset, shortMAPoint);
-                if (correspondingPlottedSignal.showLongMA) pushAndFilter(longMADataset, longMAPoint);
+
+                // Ensure dataset exists before trying to push/filter
+                if (correspondingPlottedSignal.showRaw) {
+                     if (!rawDataset) { // Dataset might not exist if history failed or showRaw was toggled
+                         updateDataset(chart, rawLabel, [rawPoint], correspondingPlottedSignal.color, false);
+                         rawDataset = chart.data.datasets.find(ds => ds.label === rawLabel); // Re-find dataset
+                     } else {
+                         pushAndFilter(rawDataset, rawPoint);
+                     }
+                }
+                if (correspondingPlottedSignal.showShortMA) {
+                    if (!shortMADataset) {
+                        updateDataset(chart, shortMALabel, [shortMAPoint], correspondingPlottedSignal.color, true);
+                        shortMADataset = chart.data.datasets.find(ds => ds.label === shortMALabel);
+                    } else {
+                        pushAndFilter(shortMADataset, shortMAPoint);
+                    }
+                }
+                if (correspondingPlottedSignal.showLongMA) {
+                     if (!longMADataset) {
+                         updateDataset(chart, longMALabel, [longMAPoint], correspondingPlottedSignal.color, true);
+                         longMADataset = chart.data.datasets.find(ds => ds.label === longMALabel);
+                     } else {
+                         pushAndFilter(longMADataset, longMAPoint);
+                     }
+                }
             }
         });
     }
 
-    // --- Process Language Volume Updates --- 
+    // --- Process Language Volume Updates ---
     if (payload.langVolumes && payload.langVolumes.length > 0) {
+        function pushAndFilterVolume(dataset: ChartDataset<'bar', ChartPoint[]> | undefined, point: ChartPoint) {
+             if (!dataset || !dataset.data) return;
+             const dataArray = dataset.data as ChartPoint[];
+             if (dataArray.length > 0 && dataArray[dataArray.length - 1].x === point.x) {
+                 // Update the last point's value instead of adding duplicate timestamp
+                 dataArray[dataArray.length - 1].y = (dataArray[dataArray.length - 1].y ?? 0) + (point.y ?? 0);
+                 // console.log(`[pushAndFilterVolume] Updating volume for existing timestamp ${point.x} for ${dataset.label}`);
+             } else {
+                dataArray.push(point);
+                // console.log(`[pushAndFilterVolume] Pushing new volume point for ${dataset.label}: x=${point.x}, y=${point.y}`);
+             }
+             dataset.data = dataArray.filter(p => typeof p === 'object' && p !== null && typeof p.x === 'number' && p.x >= bufferTime);
+             chartNeedsUpdate = true;
+        }
         payload.langVolumes.forEach(volumeUpdate => {
             const { language: langCode, timestamp, totalPostCount } = volumeUpdate;
             const volumeLabel = `Volume (${langCode})`;
-            const volumeDataset = volumeChart.data.datasets.find(ds => ds.label === volumeLabel);
-    
-            if (volumeDataset) {
-                const volumePoint: ChartPoint = { x: timestamp, y: totalPostCount }; // Use totalPostCount directly
-                const dataArray = volumeDataset.data as ChartPoint[];
-                dataArray.push(volumePoint);
-                volumeDataset.data = dataArray.filter(p => p.x >= bufferTime);
-                chartNeedsUpdate = true;
+            let dataset = volumeChart.data.datasets.find(ds => ds.label === volumeLabel) as ChartDataset<'bar', ChartPoint[]> | undefined;
+            const point: ChartPoint = { x: timestamp, y: totalPostCount };
+
+            // Only update volume if the language is currently plotted
+            const isLangPlotted = plottedSignals.some(p => p.languageCode === langCode);
+            // console.log(`[handleLiveUpdate] Volume update for ${langCode}. Is plotted: ${isLangPlotted}`);
+
+            if (isLangPlotted) {
+                 if (dataset) {
+                     pushAndFilterVolume(dataset, point);
+                 } else {
+                     // Dataset might not exist if history failed or language was just added
+                     const firstSignalForLang = plottedSignals.find(p => p.languageCode === langCode);
+                     const color = firstSignalForLang ? firstSignalForLang.color + '80' : '#CCCCCC';
+                     console.log(`[handleLiveUpdate] Creating volume dataset ${volumeLabel} via live update.`);
+                     updateDataset(volumeChart, volumeLabel, [point], color);
+                     chartNeedsUpdate = true;
+                 }
             } else {
-                 // Comment out the warning as it's expected if the language isn't being plotted
-                 // console.warn(`[handleLiveUpdate] Volume dataset not found for label: ${volumeLabel}.`);
+                // If language is not plotted, ensure its volume dataset is removed (belt and suspenders)
+                 if (dataset) {
+                     console.log(`[handleLiveUpdate] Removing volume dataset ${volumeLabel} because language ${langCode} is no longer plotted.`);
+                     removeDataset(volumeChart, volumeLabel);
+                     chartNeedsUpdate = true;
+                 }
             }
         });
     }
 
     if (chartNeedsUpdate) {
+        sortVolumeDatasets(volumeChart);
         updateCharts();
+        // console.log('[handleLiveUpdate] Finished processing, charts updated.'); // Reduce noise
     }
 } 

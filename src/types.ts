@@ -63,6 +63,8 @@ export interface MetricSignal {
     id: number | string; // number for filter (DB ID), string for base metric name
     name: string;       // Name used for identification and display
     keywords_json?: { include?: string[], exclude?: string[] }; // For filters
+    base_metric_key?: string; // Add this: Metric this filter applies to (optional)
+    filter_language_code?: string; // Add this: Language this filter applies to (optional)
     description?: string;
     is_active?: boolean;
     type: 'metric' | 'filter'; // Type identifier

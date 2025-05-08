@@ -1,4 +1,5 @@
 import { MetricSignal, HistoryEntry, WindowState, SentimentScores, AvgWindowState } from '../types.js';
+import { loadDynamicSignalsFromDB } from './db.js'; // Import the DB loading function
 
 // Export mutable state variables
 export let dynamicSignals: MetricSignal[] = [];
@@ -8,4 +9,21 @@ export let currentIntervalScores: { [lang: string]: { [signalName: string]: Sent
 export let currentIntervalPostCount: { [lang: string]: { [signalName: string]: number } } = {};
 export let recentHistoryBuffer: { [signalLangKey: string]: HistoryEntry[] } = {};
 export let liveMAState: { [signalLangKey: string]: { short: WindowState; long: WindowState } } = {};
-export let liveAvgMAState: { [signalLangKey: string]: { short: AvgWindowState; long: AvgWindowState } } = {}; 
+export let liveAvgMAState: { [signalLangKey: string]: { short: AvgWindowState; long: AvgWindowState } } = {};
+
+/**
+ * Reloads the dynamic signals from the database and updates the in-memory state.
+ */
+export async function reloadDynamicSignals(): Promise<void> {
+    console.log('Reloading dynamic signals state from database...');
+    try {
+        const loadedSignals = await loadDynamicSignalsFromDB();
+        // Replace the contents of the existing array
+        dynamicSignals.length = 0; // Clear the array
+        dynamicSignals.push(...loadedSignals); // Add new signals
+        console.log(`Successfully reloaded ${dynamicSignals.length} dynamic signals into state.`);
+    } catch (error: any) {
+        console.error('Failed to reload dynamic signals state:', error.message || error);
+        // Decide if we should exit or just continue with potentially stale state
+    }
+} 

@@ -12,16 +12,28 @@ export interface HistoryEntry {
     longAvg?: SentimentScores | null;
 }
 
-export type ChartPoint = { x: number; y: number | null; };
+/**
+ * Represents a single point on the chart.
+ */
+export type ChartPoint = {
+    x: number; // Timestamp
+    y: number;  // Value (e.g., score, volume) - Changed from number | null
+};
 
 export interface PlottedSignalConfig {
     id: string;
     languageCode: string;
-    metric: string;
+    signalName: string;
+    label: string;
+    type: 'metric' | 'filter';
+    filter?: any;
     color: string;
     showRaw: boolean;
     showShortMA: boolean;
     showLongMA: boolean;
+    langData?: { [lang: string]: ChartPoint[] };
+    langColors?: { [lang: string]: string };
+    plottedLangs?: Set<string>;
 }
 
 // --- Backend Data Types ---
@@ -47,7 +59,19 @@ export interface AvailableSignal {
 
 // Message types (consider refining these if needed)
 export type ServerHistoryPayload = { signalLangData: { [key: string]: HistoryEntry[] } };
-export type ServerLiveUpdatePayload = { updates: LiveUpdateEntry[] };
+
+// Add definition for LiveLangVolumeUpdateEntry
+export interface LiveLangVolumeUpdateEntry {
+    language: string;
+    timestamp: number;
+    totalPostCount: number;
+}
+
+// Update ServerLiveUpdatePayload to include optional langVolumes
+export type ServerLiveUpdatePayload = {
+     updates: LiveUpdateEntry[];
+     langVolumes?: LiveLangVolumeUpdateEntry[]; 
+};
 
 export type ServerHistoryMessage = { type: 'historyData', payload: ServerHistoryPayload };
 export type ServerLiveUpdateMessage = { type: 'liveUpdate', payload: ServerLiveUpdatePayload };

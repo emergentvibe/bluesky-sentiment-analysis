@@ -28,4 +28,41 @@ export async function fetchAvailableSignals(): Promise<void> {
         console.error("Error fetching available signals:", error);
         availableSignals.length = 0; // Ensure it's empty on error
     }
+}
+
+/**
+ * Creates a new keyword filter signal on the backend.
+ * @returns The definition (id, name, type) of the created/existing filter signal.
+ */
+export async function createKeywordFilterSignal(baseMetricKey: string, language: string, keywords: string): Promise<AvailableSignal | null> {
+    console.log(`Creating keyword filter signal for metric: ${baseMetricKey}, lang: ${language}, keywords: "${keywords}"`);
+    try {
+        const response = await fetch('/api/filters', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ baseMetricKey, language, keywords }),
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ error: 'Failed to parse error response' }));
+            console.error(`HTTP error creating filter! Status: ${response.status}`, errorData);
+            throw new Error(errorData.error || `HTTP error ${response.status}`);
+        }
+
+        // Expect the backend to return fields compatible with AvailableSignal
+        const createdFilter: AvailableSignal = await response.json(); 
+        console.log('Successfully created/retrieved filter:', createdFilter);
+        // Ensure the type is set correctly if the backend doesn't explicitly return it
+        if (!createdFilter.type) {
+            createdFilter.type = 'filter'; 
+        }
+        return createdFilter;
+
+    } catch (error: any) {
+        console.error("Error creating keyword filter signal:", error.message || error);
+        alert(`Error creating filter: ${error.message || 'Unknown error'}`);
+        return null;
+    }
 } 

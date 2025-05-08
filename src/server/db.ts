@@ -87,12 +87,24 @@ export async function initializeDatabase(): Promise<void> {
                 name VARCHAR(100) UNIQUE NOT NULL,
                 description TEXT,
                 keywords_json JSONB NOT NULL, -- Store keywords as JSON { "include": [...], "exclude": [...] }
+                base_metric_key TEXT NULL,
+                filter_language_code VARCHAR(10) NULL,
                 is_active BOOLEAN DEFAULT TRUE,
                 created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             );
         `);
         console.log('Table "complex_keyword_filters" ensured.');
+
+        // Add columns individually for idempotency
+        await client.query(`ALTER TABLE complex_keyword_filters ADD COLUMN IF NOT EXISTS base_metric_key TEXT NULL;`);
+        await client.query(`ALTER TABLE complex_keyword_filters ADD COLUMN IF NOT EXISTS filter_language_code VARCHAR(10) NULL;`);
+        console.log('Columns base_metric_key, filter_language_code ensured in complex_keyword_filters.');
+
+        // Add index on new columns for potential lookups
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_complex_filters_metric_lang ON complex_keyword_filters (base_metric_key, filter_language_code);`);
+        console.log('Index "idx_complex_filters_metric_lang" ensured.');
+
         await client.query(`CREATE INDEX IF NOT EXISTS idx_complex_filters_active ON complex_keyword_filters (is_active);`);
         console.log('Index "idx_complex_filters_active" ensured.');
 
@@ -220,28 +232,34 @@ export async function loadDynamicSignalsFromDB(): Promise<MetricSignal[]> {
     let client: PoolClient | null = null;
     try {
         client = await pool.connect();
-        const queryResult: QueryResult<MetricSignal> = await client.query(
-            `SELECT id, name, keywords_json, description, is_active
+        // Select the new columns as well
+        const queryResult: QueryResult = await client.query(
+            `SELECT id, name, keywords_json, description, is_active, base_metric_key, filter_language_code
              FROM complex_keyword_filters
              WHERE is_active = TRUE
              ORDER BY name ASC`
         );
         console.log(`Loaded ${queryResult.rowCount} active dynamic signals.`);
         return queryResult.rows.map(row => {
+            // Map the new columns to the MetricSignal object
             const signal: MetricSignal = {
                 id: row.id,
                 name: row.name,
                 keywords_json: row.keywords_json,
                 description: row.description,
                 is_active: row.is_active,
+                base_metric_key: row.base_metric_key, // Add this mapping
+                filter_language_code: row.filter_language_code, // Add this mapping
                 type: 'filter'
             };
+            // Basic validation for keywords_json
             try {
                 if (typeof signal.keywords_json === 'string') {
-                   JSON.parse(signal.keywords_json);
+                   JSON.parse(signal.keywords_json); // Attempt to parse if it's a string
                 } else if (typeof signal.keywords_json !== 'object' || signal.keywords_json === null) {
-                    throw new Error('keywords_json is not a valid object');
+                    throw new Error('keywords_json is not a valid object or null');
                 }
+                // Further validation could check for { include: [], exclude: [] } structure if needed
                 return signal;
             } catch (e: any) {
                 console.error(`Invalid JSON in keywords_json for signal id ${signal.id} (${signal.name}): ${e.message}. Skipping.`);
@@ -254,8 +272,6 @@ export async function loadDynamicSignalsFromDB(): Promise<MetricSignal[]> {
     } finally {
         client?.release();
     }
-    // Unreachable, but satisfies compiler
-    return [];
 }
 
 /**

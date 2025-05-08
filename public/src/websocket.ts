@@ -107,7 +107,7 @@ export function requestHistoryData() {
         }
 
         const requiredLanguages = Array.from(new Set(plottedSignals.map(signal => signal.languageCode)));
-        const requiredSignalNames = Array.from(new Set(plottedSignals.map(signal => signal.metric)));
+        const requiredSignalNames = Array.from(new Set(plottedSignals.map(signal => signal.signalName)));
 
         let desiredIntervalMs = AGGREGATION_INTERVAL_MS;
         const oneDayMs = 24 * HOUR_MS;

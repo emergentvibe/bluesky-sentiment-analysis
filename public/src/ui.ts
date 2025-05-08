@@ -16,6 +16,7 @@ import {
 } from './dom.ts';
 import { requestHistoryData } from './websocket.ts';
 import { PlottedSignalConfig } from './types.ts';
+import { createKeywordFilterSignal } from './api.ts';
 
 
 // --- UI Controls Setup ---
@@ -71,6 +72,8 @@ export function setupControls() {
 
     // --- Event Listeners ---
     addSignalBtn?.addEventListener('click', () => {
+        const keywordInputElement = document.getElementById('keywordInput') as HTMLInputElement | null;
+        if (keywordInputElement) keywordInputElement.value = ''; 
         if (signalSelectorDiv) signalSelectorDiv.style.display = 'block';
     });
 
@@ -78,35 +81,79 @@ export function setupControls() {
         if (signalSelectorDiv) signalSelectorDiv.style.display = 'none';
     });
 
-    // Attach confirm button listener - check elements *inside* callback
-    confirmSignalBtn?.addEventListener('click', () => {
+    confirmSignalBtn?.addEventListener('click', async () => {
         console.log("Confirm Signal Button clicked!");
 
-        // Check required elements INSIDE the listener scope
-        if (!langSelect || !availableSignalsList || !signalColorInput || !showRawCheckbox || !showShortMACheckbox || !showLongMACheckbox) {
-             console.error("Cannot confirm signal: One or more required configuration elements are missing at click time.");
+        // Get all required DOM elements
+        const langElement = langSelect;
+        const signalsListElement = availableSignalsList;
+        const colorElement = signalColorInput;
+        const showRawElement = showRawCheckbox;
+        const showShortMAElement = showShortMACheckbox;
+        const showLongMAElement = showLongMACheckbox;
+        const keywordInputElement = document.getElementById('keywordInput') as HTMLInputElement | null;
+
+        // Validate elements exist
+        if (!langElement || !signalsListElement || !colorElement || !showRawElement || !showShortMAElement || !showLongMAElement || !keywordInputElement) {
+             console.error("Cannot confirm signal: One or more required configuration elements are missing.");
              return;
         }
 
-        const selectedLang = langSelect.value; // Safe now due to check above
-        const selectedSignalRadio = availableSignalsList.querySelector('input[name="availableSignal"]:checked') as HTMLInputElement | null; // Safe now due to check above
+        // Add checks before accessing properties
+        const selectedLang = langElement.value; 
+        const selectedSignalRadio = signalsListElement.querySelector('input[name="availableSignal"]:checked') as HTMLInputElement | null;
+        const selectedColor = colorElement.value; 
+        const showRaw = showRawElement.checked; 
+        const showShortMA = showShortMAElement.checked;
+        const showLongMA = showLongMAElement.checked;
+        const keywords = keywordInputElement.value.trim();
 
         if (!selectedSignalRadio) {
-            console.warn("Could not add signal - No metric selected.");
+            console.warn("Could not add signal - No metric/signal selected.");
+            alert("Please select a base signal/metric.");
             return;
         }
-        const selectedMetric = selectedSignalRadio.value;
-        const selectedColor = signalColorInput.value; // Safe now due to check above
-        const showRaw = showRawCheckbox.checked; // Safe now due to check above
-        const showShortMA = showShortMACheckbox.checked; // Safe now due to check above
-        const showLongMA = showLongMACheckbox.checked; // Safe now due to check above
+        const selectedBaseSignalName = selectedSignalRadio.value;
 
-        // selectedLang is guaranteed by the initial check inside the handler
-        if (selectedMetric && selectedColor) { 
-            addSignalToPlot(selectedLang, selectedMetric, selectedColor, showRaw, showShortMA, showLongMA);
+        let signalToAddName = selectedBaseSignalName;
+        let signalToAddType: 'metric' | 'filter' = 'metric';
+
+        const selectedBaseSignal = availableSignals.find(s => s.name === selectedBaseSignalName);
+        if (selectedBaseSignal) {
+            signalToAddType = selectedBaseSignal.type;
+        }
+
+        // If keywords are provided, create a new filter signal via API
+        if (keywords.length > 0) {
+             console.log("Keywords provided, attempting to create filter signal...");
+             // Ensure selectedBaseSignalName is valid before calling API
+             if (!selectedBaseSignalName) {
+                 console.error("Cannot create filter: Base signal name is missing.");
+                 alert("Cannot create filter without a selected base signal.");
+                 return;
+             }
+             const createdFilter = await createKeywordFilterSignal(selectedBaseSignalName, selectedLang, keywords);
+             if (createdFilter) {
+                 signalToAddName = createdFilter.name; 
+                 signalToAddType = 'filter';
+                 console.log(`Using created filter signal name: ${signalToAddName}`);
+             } else {
+                 console.error("Failed to create keyword filter signal. Aborting add.");
+                 return;
+             }
         } else {
-             // This case should be less likely now
-             console.warn("Could not add signal - Metric or Color missing?", { selectedLang, selectedMetric, selectedColor });
+            if (signalToAddType === 'filter') {
+                console.log(`Plotting existing filter signal: ${signalToAddName}`);
+            } else {
+                console.log(`Plotting base metric signal: ${signalToAddName}`);
+            }
+        }
+
+        // Proceed to add the signal (either base metric or filter) to the plot
+        if (signalToAddName && selectedColor) {
+            addSignalToPlot(selectedLang, signalToAddName, selectedColor, showRaw, showShortMA, showLongMA, signalToAddType);
+        } else {
+             console.warn("Could not add signal - Final name or color missing?", { selectedLang, signalToAddName, selectedColor });
         }
 
         if (signalSelectorDiv) signalSelectorDiv.style.display = 'none';
@@ -127,26 +174,29 @@ export function setupControls() {
 
 /**
  * Adds a new signal configuration to the plottedSignals array and updates the UI/charts.
+ * Updated to accept signal type.
  */
-export function addSignalToPlot(langCode: string, metric: string, color: string, showRaw: boolean, showShortMA: boolean, showLongMA: boolean): void {
+export function addSignalToPlot(langCode: string, signalName: string, color: string, showRaw: boolean, showShortMA: boolean, showLongMA: boolean, signalType: 'metric' | 'filter'): void {
     const newSignal: PlottedSignalConfig = {
-        id: `${langCode}-${metric}-${Date.now()}`,
+        id: `${langCode}-${signalName}-${Date.now()}`,
         languageCode: langCode,
-        metric: metric,
+        signalName: signalName, // Use signalName
+        type: signalType,      // Store the type
         color: color,
         showRaw: showRaw,
         showShortMA: showShortMA,
         showLongMA: showLongMA,
     };
-    const isDuplicate = plottedSignals.some(s => s.languageCode === newSignal.languageCode && s.metric === newSignal.metric);
+    // Update duplicate check
+    const isDuplicate = plottedSignals.some(s => s.languageCode === newSignal.languageCode && s.signalName === newSignal.signalName);
 
     if (!isDuplicate) {
         plottedSignals.push(newSignal);
         updatePlottedSignalsUI();
         requestHistoryData();
-        console.log(`Added signal: ${metric} (${langCode})`);
+        console.log(`Added signal: ${signalName} (${langCode}, type: ${signalType})`);
     } else {
-        console.log("Signal configuration (lang/metric) already plotted.");
+        console.log("Signal configuration (lang/signalName) already plotted.");
     }
 }
 
@@ -164,6 +214,8 @@ export function updatePlottedSignalsUI() {
         return;
     }
     const ul = document.createElement('ul');
+    // Clear existing list items before appending new ones
+    // ul.innerHTML = ''; // This line is redundant as plottedSignalsListElement.innerHTML was just cleared
     plottedSignals.forEach(signal => {
         const li = document.createElement('li');
         li.style.display = 'flex';
@@ -174,7 +226,7 @@ export function updatePlottedSignalsUI() {
         swatch.style.cssText = `display:inline-block; width:12px; height:12px; background-color:${signal.color}; margin-right:8px; border:1px solid #ccc; flex-shrink: 0;`;
 
         const label = document.createElement('span');
-        label.textContent = `${signal.metric} (${signal.languageCode.toUpperCase()})`;
+        label.textContent = `${signal.signalName} (${signal.languageCode.toUpperCase()}) [${signal.type}]`; 
         label.style.flexGrow = '1';
         label.style.marginRight = '8px';
         label.style.overflow = 'hidden';
