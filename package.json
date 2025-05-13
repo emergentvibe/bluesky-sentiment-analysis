@@ -4,10 +4,9 @@
   "type": "module",
   "main": "dist/server.js",
   "scripts": {
-    "clean": "rm -rf dist public/dist",
+    "clean": "rm -rf dist",
     "build:backend": "tsc -p tsconfig.json",
-    "build:frontend": "esbuild public/app.ts --bundle --outfile=public/dist/app.js --sourcemap --format=esm --platform=browser",
-    "build": "npm run clean && npm run build:backend && npm run build:frontend",
+    "build": "npm run clean && npm run build:backend",
     "start": "node dist/server.js",
     "dev": "npm run build && npm start",
     "test": "echo \"Error: no test specified\" && exit 1",
@@ -19,13 +18,9 @@
   "license": "ISC",
   "description": "",
   "devDependencies": {
-    "@types/chart.js": "^2.9.41",
     "@types/express": "^5.0.1",
     "@types/mime-types": "^2.1.4",
     "@types/node": "^22.14.1",
-    "@types/ws": "^8.18.1",
-    "esbuild": "^0.25.2",
-    "tsx": "^4.19.3",
     "typescript": "^5.8.3"
   },
   "dependencies": {
@@ -35,8 +30,6 @@
     "@atproto/xrpc-server": "^0.7.15",
     "@types/commander": "^2.12.5",
     "@types/pg": "^8.11.13",
-    "chart.js": "^4.4.9",
-    "chartjs-adapter-moment": "^1.0.1",
     "commander": "^13.1.0",
     "dotenv": "^16.5.0",
     "franc": "^6.2.0",
@@ -44,6 +37,6 @@
     "moment": "^2.30.1",
     "natural": "^8.0.1",
     "pg": "^8.14.1",
-    "ws": "^8.18.1"
+    "tsx": "^4.19.3"
   }
 }

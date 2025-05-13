@@ -1,4 +1,4 @@
-import { MetricSignal, HistoryEntry, WindowState, SentimentScores, AvgWindowState } from '../types.js';
+import { MetricSignal, SentimentScores } from '../types.js';
 import { loadDynamicSignalsFromDB } from './db.js'; // Import the DB loading function
 
 // Export mutable state variables
@@ -7,9 +7,21 @@ export let currentEmotionKeys: string[] = [];
 export let baseMetricKeysMap: Map<string, boolean> = new Map();
 export let currentIntervalScores: { [lang: string]: { [signalName: string]: SentimentScores } } = {};
 export let currentIntervalPostCount: { [lang: string]: { [signalName: string]: number } } = {};
-export let recentHistoryBuffer: { [signalLangKey: string]: HistoryEntry[] } = {};
-export let liveMAState: { [signalLangKey: string]: { short: WindowState; long: WindowState } } = {};
-export let liveAvgMAState: { [signalLangKey: string]: { short: AvgWindowState; long: AvgWindowState } } = {};
+// export let recentHistoryBuffer: { [signalLangKey: string]: HistoryEntry[] } = {}; // Removed - Was for WebSocket history
+// export let liveMAState: { [signalLangKey: string]: { short: WindowState; long: WindowState } } = {}; // Removed - Old MA state
+
+// NEW State for numeric MAs (per metric)
+export interface SimpleMAState {
+    queue: number[];      // Queue of recent numeric values
+    windowPoints: number; // Size of the window
+    // sum?: number; // Optional: Can add sum for performance optimization
+}
+export let liveAvgMAState: {
+    [signalLangMetricKey: string]: { // Key format: signalName_language_metricName
+        short: SimpleMAState;
+        long: SimpleMAState;
+    }
+} = {};
 
 /**
  * Reloads the dynamic signals from the database and updates the in-memory state.

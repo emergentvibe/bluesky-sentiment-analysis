@@ -1,0 +1,62 @@
+    version: '3.8'
+
+    services:
+      # Your existing backend service (if you run it via docker-compose)
+      backend:
+        build: .
+        container_name: bluesky-sentiment-backend # Optional: give it a name
+        ports:
+          - "3000:3000"
+        environment:
+          # Make sure DATABASE_URL points to the postgres service:
+          - DATABASE_URL=postgresql://bluesky_user:bluesky_password@postgres:5432/bluesky_sentiment # Ensure user/pass/db match postgres service
+        depends_on:
+          postgres: # Ensure backend starts after postgres is ready
+            condition: service_healthy
+        restart: unless-stopped # Optional: Restart policy
+        # networks:
+        #   - default_network
+
+      postgres:
+        image: postgres:16-alpine # Use a specific version, alpine is smaller
+        container_name: bluesky-sentiment-postgres
+        ports:
+          - "5432:5432" # Expose port 5432 externally if needed for direct access/debug
+        environment:
+          POSTGRES_DB: bluesky_sentiment # CHANGE if your DB name is different
+          POSTGRES_USER: bluesky_user     # CHANGE if your user is different
+          POSTGRES_PASSWORD: bluesky_password # CHANGE THIS PASSWORD!
+        volumes:
+          - postgres-data:/var/lib/postgresql/data # Persist data
+        restart: unless-stopped
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U bluesky_user -d bluesky_sentiment"]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+        # networks:
+        #   - default_network
+
+      grafana:
+        image: grafana/grafana-oss:latest # Use the latest OSS version
+        container_name: bluesky-sentiment-grafana
+        ports:
+          - "3001:3000" # Map Grafana's port 3000 to host port 3001 (or another free port)
+        volumes:
+          - grafana-storage:/var/lib/grafana # Persist Grafana data
+        environment:
+          - GF_SECURITY_ADMIN_USER=admin
+          - GF_SECURITY_ADMIN_PASSWORD=admin # Change this in production!
+          # - GF_INSTALL_PLUGINS= # Add any plugins if needed later
+        depends_on:
+           postgres: # Wait for postgres to be healthy (optional but good practice)
+               condition: service_healthy
+        # networks:
+        #   - default_network
+
+    volumes:
+      grafana-storage: {}
+      postgres-data: {}
+
+    # networks: # Define network if needed (often handled by default)
+    #   default_network:

@@ -17,10 +17,8 @@ export interface AggregatedScoreEntry {
     postCount: number;
 }
 
-/**
- * Structure for historical data points, including moving averages.
- * Extends AggregatedScoreEntry, specifying timestamp as number and adding MAs.
- */
+/** DEPRECATED: Structure for historical data points, including moving averages. */
+/*
 export interface HistoryEntry {
     timestamp: number;       // Unix timestamp (ms)
     // Rename scores to avgScores to reflect it's the average per post for the interval
@@ -30,21 +28,19 @@ export interface HistoryEntry {
     shortAvg?: SentimentScores | null; // Optional short-term moving average
     longAvg?: SentimentScores | null;  // Optional long-term moving average
 }
-
-/**
- * Structure representing a raw row fetched from the `sentiment_data` database table.
- * Extends AggregatedScoreEntry, specifying timestamp as Date.
  */
+
+/** DEPRECATED: Structure representing a raw row fetched from the `sentiment_data` database table. */
+/* 
 export interface RawDbEntry {
     timestamp: string | Date;
     scores: SentimentScores;
     postCount: number;
 }
-
-/**
- * Structure for a single live update data point broadcast via WebSocket.
- * Contains data for a specific signal and language.
  */
+
+/** DEPRECATED: Structure for a single live update data point broadcast via WebSocket. */
+/*
 export interface LiveUpdateEntry {
     signalName: string;      // Specific metric or filter name
     language: string;
@@ -54,6 +50,7 @@ export interface LiveUpdateEntry {
     shortAvg: SentimentScores | null; // Latest calculated short MA
     longAvg: SentimentScores | null;  // Latest calculated long MA
 }
+*/
 
 /**
  * Structure representing a dynamic signal configuration (e.g., a complex filter).
@@ -70,13 +67,15 @@ export interface MetricSignal {
     type: 'metric' | 'filter'; // Type identifier
 }
 
-/** State required for calculating a moving average incrementally. */
+/** DEPRECATED: State required for calculating a moving average incrementally. */
+/*
 export interface WindowState {
     queue: HistoryEntry[]; // HistoryEntry now uses avgScores
     summedScores: SentimentScores | null;
     summedPostCount: number;
     windowPoints: number;
 }
+*/
 
 /**
  * Defines the structure of commit metadata passed from the FirehoseSubscription callback.
@@ -109,7 +108,8 @@ export interface WebSocketMessage {
     payload: any;
 }
 
-/** Message from client requesting historical data. */
+/** DEPRECATED: Message from client requesting historical data. */
+/*
 export interface RequestHistoryMessage {
     type: 'requestHistory';
     payload: {
@@ -119,8 +119,10 @@ export interface RequestHistoryMessage {
         signalNames: string[];
     };
 }
+*/
 
-/** Message from server containing historical data. */
+/** DEPRECATED: Message from server containing historical data. */
+/*
 export interface HistoryDataMessage extends WebSocketMessage {
     type: 'historyData';
     payload: {
@@ -128,6 +130,7 @@ export interface HistoryDataMessage extends WebSocketMessage {
         signalLangData: { [signalLangKey: string]: HistoryEntry[] };
     };
 }
+*/
 
 /** Message from server indicating an error. */
 export interface ErrorMessage extends WebSocketMessage {
@@ -141,9 +144,10 @@ export interface ClientMessage {
     payload?: any; 
 }
 
-export type ClientDataType = RequestHistoryMessage | { type: 'ping' }; // Example
+// export type ClientDataType = RequestHistoryMessage | { type: 'ping' }; // Example - Likely remove or simplify if no client interaction
 
-// For database rows (matches new schema)
+// DEPRECATED: For database rows (matches old schema)
+/*
 export interface SentimentDataDbRow {
     timestamp: Date; // Or string depending on pg driver
     language: string;
@@ -153,38 +157,70 @@ export interface SentimentDataDbRow {
     short_avg: SentimentScores | null;
     long_avg: SentimentScores | null;
 }
+*/
 
-// State for calculating simple moving average of average scores
+// DEPRECATED: State for calculating simple moving average of average scores
+/*
 export interface AvgWindowState {
     queue: (SentimentScores | null)[]; // Queue of past average scores
     windowPoints: number;
     // Optional: summedAvgScores might be useful if needed for optimization, but simple queue is fine
 }
+*/
 
+// DEPRECATED: History Data Payload
+/*
 export interface HistoryDataPayload {
     signalLangData: { [signalLangKey: string]: HistoryEntry[] };
 }
+*/
 
+// DEPRECATED: History Data Message
+/*
 export interface HistoryDataMessage {
     type: 'historyData';
     payload: HistoryDataPayload;
 }
+*/
 
-// Added: Structure for total volume update per language
+// DEPRECATED: Structure for total volume update per language
+/*
 export interface LiveLangVolumeUpdateEntry {
     language: string;
     timestamp: number;       // Unix timestamp (ms)
     totalPostCount: number;  // Total posts for this language in the interval
 }
+*/
 
-// Updated: LiveUpdatePayload includes optional language volumes
+// DEPRECATED: LiveUpdatePayload includes optional language volumes
+/*
 export interface LiveUpdatePayload {
   updates: LiveUpdateEntry[]; // Per-signal updates (avgScores, MAs, etc.)
   langVolumes?: LiveLangVolumeUpdateEntry[]; // Optional: Total volume per language
 }
+*/
 
-// Corrected LiveUpdateMessage definition (ensure it extends WebSocketMessage)
+// DEPRECATED: Corrected LiveUpdateMessage definition (ensure it extends WebSocketMessage)
+/*
 export interface LiveUpdateMessage extends WebSocketMessage {
   type: 'liveUpdate';
   payload: LiveUpdatePayload;
 } 
+*/
+
+export interface LiveUpdateEntry {
+    signalName?: string; // Added to distinguish between base metrics and filter signals
+}
+
+// NEW Type for database rows from sentiment_metrics
+export interface SentimentMetricRow {
+    timestamp: Date | string;
+    language: string;
+    signal_name: string;
+    metric_name: string;
+    raw_value?: number | null;
+    short_ma_value?: number | null;
+    long_ma_value?: number | null;
+}
+
+// Describes the structure for a signal (metric or filter) 

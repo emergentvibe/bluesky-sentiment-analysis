@@ -1,9 +1,8 @@
 import { pool } from './db.js'; // Import DB pool
-import { LiveUpdateEntry, HistoryEntry, LiveUpdateMessage, SentimentScores, AvgWindowState, LiveLangVolumeUpdateEntry, LiveUpdatePayload } from '../types.js';
-import { baseMetricKeysMap, currentIntervalScores, currentIntervalPostCount, liveAvgMAState, /* liveMAState, recentHistoryBuffer */ } from './state.js';
-import { LIVE_UPDATE_BUFFER_MS, SHORT_AVG_WINDOW_POINTS, LONG_AVG_WINDOW_POINTS } from './config.js';
-import { createEmptyScores, calculateAvgMAState /* updateIncrementalWindowState */ } from './sentimentUtils.js';
-import { broadcast } from './websocketServer.js';
+import { SentimentScores } from '../types.js';
+import { baseMetricKeysMap, currentIntervalScores, currentIntervalPostCount, liveAvgMAState, SimpleMAState } from './state.js';
+import { SHORT_AVG_WINDOW_POINTS, LONG_AVG_WINDOW_POINTS } from './config.js';
+import { createEmptyScores, calculateSimpleMovingAverage } from './sentimentUtils.js';
 
 /**
  * Aggregates scores accumulated during the interval, calculates average scores per post,
@@ -12,17 +11,11 @@ import { broadcast } from './websocketServer.js';
  */
 export async function aggregateAndStore(): Promise<void> {
     const timestamp = new Date();
-    // bufferCutoffTime might not be needed if recentHistoryBuffer is removed/repurposed
-    // const bufferCutoffTime = timestamp.getTime() - LIVE_UPDATE_BUFFER_MS;
     let client = null;
-    let liveUpdates: LiveUpdateEntry[] = [];
-    // updatedSignalLangKeys might not be needed if recentHistoryBuffer is removed
-    // const updatedSignalLangKeys = new Set<string>();
+    const rowsToInsert: any[][] = []; // Array to hold rows for batch insert
 
     const scoresToReset: typeof currentIntervalScores = {};
     const countsToReset: typeof currentIntervalPostCount = {};
-    // Map to store total post count per language for this interval
-    const intervalTotalVolumeByLang: { [lang: string]: number } = {};
 
     try {
         client = await pool.connect();
@@ -32,102 +25,79 @@ export async function aggregateAndStore(): Promise<void> {
             if (!currentIntervalScores.hasOwnProperty(langCode)) continue;
             scoresToReset[langCode] = {};
             countsToReset[langCode] = {};
-            // Initialize language volume counter
-            if (intervalTotalVolumeByLang[langCode] === undefined) {
-                 intervalTotalVolumeByLang[langCode] = 0;
-            }
 
             for (const dbSignalName in currentIntervalScores[langCode]) {
                 if (!currentIntervalScores[langCode].hasOwnProperty(dbSignalName)) continue;
 
-                const accumulatedScores = currentIntervalScores[langCode][dbSignalName];
                 const postCount = currentIntervalPostCount[langCode][dbSignalName];
                 
-                // Accumulate total volume for the language
-                intervalTotalVolumeByLang[langCode] += postCount;
+                // --- Process 'post_count' metric --- 
+                const postCountMetricName = 'post_count';
+                const postCountRawValue = postCount; // Raw value is just the count for this interval
+                const postCountKey = `${dbSignalName}_${langCode}_${postCountMetricName}`;
 
-                let avgScores: SentimentScores = createEmptyScores();
-                let shortAvg: SentimentScores | null = null;
-                let longAvg: SentimentScores | null = null;
-
-                if (postCount > 0) {
-                    // 1. Calculate Average Scores per Post for the interval
-                    // Overwrite avgScores with calculated values
-                    baseMetricKeysMap.forEach((_, key) => {
-                        if (Object.prototype.hasOwnProperty.call(accumulatedScores, key)) {
-                            avgScores[key] = accumulatedScores[key] / postCount;
-                        }
-                    });
-
-                    // 2. Calculate MAs based on Average Scores
-                    const signalLangKey = `${dbSignalName}_${langCode}`;
-                    if (!liveAvgMAState[signalLangKey]) {
-                        // Initialize state
-                        liveAvgMAState[signalLangKey] = { short: { queue: [], windowPoints: SHORT_AVG_WINDOW_POINTS }, long: { queue: [], windowPoints: LONG_AVG_WINDOW_POINTS } };
-                    }
-                    shortAvg = calculateAvgMAState(liveAvgMAState[signalLangKey].short, avgScores);
-                    longAvg = calculateAvgMAState(liveAvgMAState[signalLangKey].long, avgScores);
-
-                    // 3. Store in DB 
-                    const values = [ timestamp, langCode, dbSignalName, JSON.stringify(avgScores), postCount, shortAvg ? JSON.stringify(shortAvg) : null, longAvg ? JSON.stringify(longAvg) : null ];
-                    await client.query(
-                        `INSERT INTO sentiment_data (timestamp, language, signal_name, avg_scores, post_count, short_avg, long_avg)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7)
-                         ON CONFLICT (timestamp, language, signal_name) DO UPDATE SET
-                           avg_scores = EXCLUDED.avg_scores,
-                           post_count = EXCLUDED.post_count,
-                           short_avg = EXCLUDED.short_avg,
-                           long_avg = EXCLUDED.long_avg`,
-                        values
-                    );
-
-                } else {
-                    // Handle 0 posts: avgScores is already initialized to 0s
-                    const signalLangKey = `${dbSignalName}_${langCode}`;
-                    if (!liveAvgMAState[signalLangKey]) {
-                         // Initialize state
-                         liveAvgMAState[signalLangKey] = { short: { queue: [], windowPoints: SHORT_AVG_WINDOW_POINTS }, long: { queue: [], windowPoints: LONG_AVG_WINDOW_POINTS } };
-                    }
-                    // Update MAs using the 0 avgScores
-                    shortAvg = calculateAvgMAState(liveAvgMAState[signalLangKey].short, avgScores); 
-                    longAvg = calculateAvgMAState(liveAvgMAState[signalLangKey].long, avgScores); 
-
-                    // Store 0 posts / 0 avg score / resulting MAs
-                    const values = [ timestamp, langCode, dbSignalName, JSON.stringify(avgScores), postCount, shortAvg ? JSON.stringify(shortAvg) : null, longAvg ? JSON.stringify(longAvg) : null ];
-                    await client.query(
-                        `INSERT INTO sentiment_data (timestamp, language, signal_name, avg_scores, post_count, short_avg, long_avg)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7)
-                         ON CONFLICT (timestamp, language, signal_name) DO UPDATE SET
-                           avg_scores = EXCLUDED.avg_scores, post_count = EXCLUDED.post_count, short_avg = EXCLUDED.short_avg, long_avg = EXCLUDED.long_avg`,
-                        values
-                    );
+                // Initialize state if not present - TEMPORARILY COMMENTED OUT
+                /*
+                if (!liveAvgMAState[postCountKey]) {
+                    liveAvgMAState[postCountKey] = {
+                        short: { queue: [], windowPoints: SHORT_AVG_WINDOW_POINTS },
+                        long: { queue: [], windowPoints: LONG_AVG_WINDOW_POINTS }
+                    };
                 }
+                */
 
-                // --- Prepare Live Update Payloads --- 
-                // avgScores is guaranteed non-null here
-                if (dbSignalName === 'default') {
-                    baseMetricKeysMap.forEach((_, metricKey) => {
-                        liveUpdates.push({
-                            signalName: metricKey,
-                            language: langCode,
-                            timestamp: timestamp.getTime(),
-                            avgScores: avgScores, // Send avg scores
-                            postCount: postCount,
-                            shortAvg: shortAvg,   // Send latest calculated short MA
-                            longAvg: longAvg    // Send latest calculated long MA
-                        });
+                // Calculate MAs for post_count - TEMPORARILY SET TO NULL
+                const shortMaPostCount = null; // calculateSimpleMovingAverage(liveAvgMAState[postCountKey].short, postCountRawValue);
+                const longMaPostCount = null; // calculateSimpleMovingAverage(liveAvgMAState[postCountKey].long, postCountRawValue);
+
+                // Add row for post_count metric
+                rowsToInsert.push([
+                    timestamp,
+                    langCode,
+                    dbSignalName,
+                    postCountMetricName,
+                    postCountRawValue,
+                    shortMaPostCount,
+                    longMaPostCount
+                ]);
+
+                // --- Process Sentiment Metrics --- 
+                const accumulatedScores = currentIntervalScores[langCode][dbSignalName]; // Get the scores for this lang/signal
+
+                baseMetricKeysMap.forEach((_, metricName) => {
+                    // Calculate raw_value (average score for this metric in the interval)
+                    let rawValue = 0;
+                    if (postCount > 0 && accumulatedScores && typeof accumulatedScores[metricName] === 'number') {
+                        rawValue = accumulatedScores[metricName] / postCount;
+                    }
+
+                    const metricKey = `${dbSignalName}_${langCode}_${metricName}`;
+
+                    // Initialize state if not present - TEMPORARILY COMMENTED OUT
+                    /*
+                    if (!liveAvgMAState[metricKey]) {
+                        liveAvgMAState[metricKey] = {
+                            short: { queue: [], windowPoints: SHORT_AVG_WINDOW_POINTS },
+                            long: { queue: [], windowPoints: LONG_AVG_WINDOW_POINTS }
+                        };
+                    }
+                    */
+
+                    // Calculate MAs for this sentiment metric - TEMPORARILY SET TO NULL
+                    const shortMaValue = null; // calculateSimpleMovingAverage(liveAvgMAState[metricKey].short, rawValue);
+                    const longMaValue = null; // calculateSimpleMovingAverage(liveAvgMAState[metricKey].long, rawValue);
+
+                    // Add row for this sentiment metric
+                    rowsToInsert.push([
+                        timestamp,
+                        langCode,
+                        dbSignalName,
+                        metricName,
+                        rawValue,
+                        shortMaValue,
+                        longMaValue
+                    ]);
                     });
-                } else {
-                    liveUpdates.push({
-                        signalName: dbSignalName,
-                        language: langCode,
-                        timestamp: timestamp.getTime(),
-                        avgScores: avgScores,
-                        postCount: postCount,
-                        shortAvg: shortAvg,
-                        longAvg: longAvg
-                    });
-                }
 
                 // Mark accumulators for reset
                 scoresToReset[langCode][dbSignalName] = createEmptyScores();
@@ -135,32 +105,29 @@ export async function aggregateAndStore(): Promise<void> {
             }
         }
 
+        // --- Batch Insert into sentiment_metrics --- 
+        if (rowsToInsert.length > 0) {
+            // Use pg-format or build the query string carefully if not using a library
+            // Simple example (vulnerable to large number of rows potentially exceeding limits, consider batching if needed)
+            const placeholders = rowsToInsert.map((_, index) => 
+                `($${index * 7 + 1}, $${index * 7 + 2}, $${index * 7 + 3}, $${index * 7 + 4}, $${index * 7 + 5}, $${index * 7 + 6}, $${index * 7 + 7})`
+            ).join(',');
+            const flatValues = rowsToInsert.flat();
+            
+            const insertQuery = `
+                INSERT INTO sentiment_metrics (timestamp, language, signal_name, metric_name, raw_value, short_ma_value, long_ma_value)
+                VALUES ${placeholders}
+                ON CONFLICT (timestamp, language, signal_name, metric_name) DO UPDATE SET
+                    raw_value = EXCLUDED.raw_value,
+                    short_ma_value = EXCLUDED.short_ma_value,
+                    long_ma_value = EXCLUDED.long_ma_value;
+            `;
+            
+            await client.query(insertQuery, flatValues);
+            console.log(`Inserted/Updated ${rowsToInsert.length} rows in sentiment_metrics.`);
+        }
+
         await client.query('COMMIT');
-
-        // --- Create Language Volume Updates --- 
-        const langVolumeUpdates: LiveLangVolumeUpdateEntry[] = [];
-        for (const langCode in intervalTotalVolumeByLang) {
-             if (intervalTotalVolumeByLang.hasOwnProperty(langCode)) {
-                 langVolumeUpdates.push({
-                     language: langCode,
-                     timestamp: timestamp.getTime(),
-                     totalPostCount: intervalTotalVolumeByLang[langCode]
-                 });
-             }
-        }
-
-        // --- Broadcast Live Updates (including langVolumes) --- 
-        if (liveUpdates.length > 0 || langVolumeUpdates.length > 0) { // Broadcast if there's either type of update
-            const payload: LiveUpdatePayload = {
-                updates: liveUpdates,
-                langVolumes: langVolumeUpdates
-            };
-            const message: LiveUpdateMessage = {
-                type: 'liveUpdate',
-                payload: payload
-            };
-            broadcast(message);
-        }
 
         // --- Reset Interval Accumulators --- 
         Object.assign(currentIntervalScores, scoresToReset);
@@ -172,12 +139,21 @@ export async function aggregateAndStore(): Promise<void> {
             if (!countsToReset[lang]) delete currentIntervalPostCount[lang];
         }
 
-        // --- Prune Old Data --- 
+        // --- Prune Old Data from sentiment_metrics --- 
         const PRUNE_AGE_MS = 31 * 24 * 60 * 60 * 1000;
         const pruneTimestamp = new Date(Date.now() - PRUNE_AGE_MS);
-        const pruneResult = await client.query('DELETE FROM sentiment_data WHERE timestamp < $1', [pruneTimestamp]);
+        // Use a separate client connection for pruning or handle potential long-running query
+        let pruneClient = null;
+        try {
+            pruneClient = await pool.connect();
+            const pruneResult = await pruneClient.query('DELETE FROM sentiment_metrics WHERE timestamp < $1', [pruneTimestamp]);
         if (pruneResult.rowCount !== null && pruneResult.rowCount > 0) {
-            console.log(`Pruned ${pruneResult.rowCount} old rows from sentiment_data.`);
+                console.log(`Pruned ${pruneResult.rowCount} old rows from sentiment_metrics.`);
+            }
+        } catch (pruneError: any) {
+            console.error('Error during pruning:', pruneError.message || pruneError);
+        } finally {
+            pruneClient?.release();
         }
 
     } catch (error: any) {
@@ -185,6 +161,10 @@ export async function aggregateAndStore(): Promise<void> {
         console.error('Error during aggregation and storage:', error.message || error);
         console.error(error.stack);
     } finally {
-        client?.release();
+        // Ensure the main transaction client is released even if pruning fails
+        /* if (client && !client.release) { // Check if it might have been released by prune error handling (unlikely but safe)
+             client.release();
+        } */
+        client?.release(); // Always release the client if it was acquired
     }
 } 

@@ -137,4 +137,4 @@ Thumbs.db
 # Project-specific ignores
 
 # Build output for frontend JavaScript
-/public/dist/ 
+# /public/dist/ 

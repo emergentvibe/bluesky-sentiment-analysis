@@ -1,5 +1,6 @@
-import { SentimentScores, WindowState, HistoryEntry, AvgWindowState } from '../types.js';
+import { SentimentScores } from '../types.js';
 import { baseMetricKeysMap } from './state.js';
+import { SimpleMAState } from './state.js';
 
 /**
  * Creates an empty SentimentScores object with all current keys initialized to 0.
@@ -32,9 +33,45 @@ export function subtractScores(target: SentimentScores, source: SentimentScores)
 }
 
 /**
- * Calculates the simple moving average based on a queue of average scores.
+ * Calculates the simple moving average based on a queue of numbers.
+ */
+export function calculateSimpleMovingAverage(state: SimpleMAState, newValue: number | null): number | null {
+    // Ensure queue is initialized
+    if (!state.queue) {
+        state.queue = [];
+    }
+
+    // Add the new value to the queue
+    state.queue.push(newValue ?? 0); // Treat null as 0 for calculation continuity, adjust if needed
+
+    // Remove oldest entry if queue exceeds window size
+    if (state.queue.length > state.windowPoints) {
+        state.queue.shift();
+    }
+
+    // Calculate the simple average of the numbers in the current window
+    let validEntriesCount = 0;
+    let currentWindowSum = 0;
+
+    for (const value of state.queue) {
+        // We pushed 0 for null, so all entries are valid numbers now
+        currentWindowSum += value;
+        validEntriesCount++;
+    }
+
+    // Compute MA if window has data, allowing partial window calculation
+    if (validEntriesCount > 0) {
+        return currentWindowSum / validEntriesCount;
+    } else {
+        return null; // Return null if no entries in the window
+    }
+}
+
+/**
+ * DEPRECATED: Calculates the simple moving average based on a queue of average scores.
  * Does not use postCount for weighting.
  */
+/* // Commenting out the old MA function
 export function calculateAvgMAState(state: AvgWindowState, avgScores: SentimentScores | null): SentimentScores | null {
     // Ensure queue is not null (initialize if first call)
     if (!state.queue) {
@@ -72,8 +109,9 @@ export function calculateAvgMAState(state: AvgWindowState, avgScores: SentimentS
         return null; // Return null if no valid entries in the window
     }
 }
+*/
 
-// --- Old functions likely no longer needed --- 
+// --- REMOVED Old/Deprecated MA functions --- 
 
 /* // Commenting out - Weighted MA calculation based on total scores/counts
 export function updateIncrementalWindowState(state: WindowState, newEntry: HistoryEntry): SentimentScores | null {

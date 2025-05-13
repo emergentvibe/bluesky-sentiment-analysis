@@ -1,10 +1,9 @@
 import 'dotenv/config'; // Load .env file variables FIRST
 
 // Import modules and specific functions/variables needed for main orchestration
-import { pool, initializeDatabase, loadEmotionKeysFromDB, loadDynamicSignalsFromDB, loadRecentMAStates } from './server/db.js';
+import { pool, initializeDatabase, loadEmotionKeysFromDB, loadDynamicSignalsFromDB, loadRecentMAStates, isLexiconPopulated, runLexiconIngestionScript } from './server/db.js';
 import { dynamicSignals, liveAvgMAState } from './server/state.js'; // Import mutable state for assignment and liveAvgMAState
 import { server } from './server/httpServer.js';
-import { initializeWebSocketServer } from './server/websocketServer.js';
 import { handleFirehoseRecord } from './server/firehoseHandler.js';
 import { aggregateAndStore } from './server/aggregation.js';
 import { AGGREGATION_INTERVAL_MS } from './server/config.js';
@@ -16,6 +15,21 @@ async function main() {
 
     await initializeDatabase();
 
+    // Check and run lexicon ingestion if necessary
+    const lexiconPopulated = await isLexiconPopulated();
+    if (!lexiconPopulated) {
+        try {
+            await runLexiconIngestionScript();
+            // After successful ingestion, it might be good to reload emotion keys
+            // if the script populates them and they are needed immediately.
+            await loadEmotionKeysFromDB(); 
+        } catch (error) {
+            console.error('Failed to run lexicon ingestion script during startup:', error);
+            // Decide if this is a critical failure that should stop the server
+            process.exit(1); 
+        }
+    }
+
     await loadEmotionKeysFromDB();
     const loadedSignals = await loadDynamicSignalsFromDB();
     dynamicSignals.length = 0;
@@ -25,10 +39,10 @@ async function main() {
     // --- Initialize MA State --- 
     console.log('Initializing live MA state from database...');
     const historicalMAStates = await loadRecentMAStates();
-    historicalMAStates.forEach((state, key) => {
+    Object.entries(historicalMAStates).forEach(([key, state]) => {
         liveAvgMAState[key] = state; // Directly assign the loaded state
     });
-    console.log(`Initialized ${historicalMAStates.size} MA states from history.`);
+    console.log(`Initialized ${Object.keys(historicalMAStates).length} MA states from history.`);
     // Any new signal/lang combo will be initialized in aggregateAndStore
 
     const firehoseServiceUrl = process.env.FIREHOSE_SERVICE_URL || 'wss://bsky.network';
@@ -48,12 +62,9 @@ async function main() {
     console.log(`Starting aggregation every ${AGGREGATION_INTERVAL_MS} ms`);
     const aggregationInterval = setInterval(aggregateAndStore, AGGREGATION_INTERVAL_MS);
 
-    initializeWebSocketServer(server);
-
     const PORT = process.env.PORT || 3000;
     server.listen(PORT, () => {
         console.log(`Server listening on http://localhost:${PORT}`);
-        console.log('WebSocket server is ready for connections.');
     });
 
     process.on('SIGINT', () => {
@@ -61,7 +72,7 @@ async function main() {
         clearInterval(aggregationInterval);
         firehose.stop();
         server.close(() => {
-            console.log('HTTP/WebSocket server closed.');
+            console.log('HTTP server closed.');
             pool.end(() => {
                 console.log('Database pool closed.');
                 process.exit(0);
