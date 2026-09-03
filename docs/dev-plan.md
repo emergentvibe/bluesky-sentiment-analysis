@@ -356,3 +356,70 @@ This document outlines the plan to build a real-time dashboard that monitors Blu
 **Future Enhancements:**
 
 *   **(Placeholder):** Consider further enhancements based on user feedback and evolving requirements.
+
+**Phase G: Grafana Integration & Backend Normalization (⚪ To Do):**
+    *   **Goal:** Transition to Grafana for visualization by refactoring the backend to store sentiment data in a normalized structure, simplifying queries and enabling the desired flexible signal/metric plotting.
+    *   **Rationale:** This phase combines the Grafana setup with the necessary backend database refactor. A normalized `sentiment_metrics` table is crucial for efficient and flexible querying from Grafana using multiple independent variables (Language, Signal Source, Metric).
+
+    *   **G.1: Foundational Backend Changes (Database & Core Logic)**
+        *   **G.1.1: Define & Implement `sentiment_metrics` Table (✅ Completed):**
+            *   Action: Modify `src/server/db.ts` (`initializeDatabase`) to create the `sentiment_metrics` table (`timestamp` TIMESTAMPTZ, `language` TEXT, `signal_name` TEXT, `metric_name` TEXT, `raw_value` FLOAT/NUMERIC, `short_ma_value` FLOAT/NUMERIC, `long_ma_value` FLOAT/NUMERIC) and its composite Primary Key.
+            *   Test: Run `initializeDatabase`; verify table and PK creation in PostgreSQL.
+        *   **G.1.2: Implement Initial Indexing for `sentiment_metrics` (✅ Completed):**
+            *   Action: Add `CREATE INDEX` statements in `initializeDatabase` for `sentiment_metrics` (e.g., composite index on PK columns, timestamp first).
+            *   Test: Verify index creation in PostgreSQL.
+        *   **G.1.3: Adapt MA State & Calculation for Numeric Values (✅ Completed):**
+            *   Action: In `src/server/state.ts`, redefine `liveAvgMAState` to handle keys like `signalName_language_metricName` and store simple numeric queues/state. In `src/server/sentimentUtils.ts`, create/adapt `calculateNumericMA` (or similar) to work with this new state and single numeric inputs.
+            *   Test: Unit tests for `calculateNumericMA` (empty queue, partial/full window, zero values).
+        *   **G.1.4: Finalize Old Schema Handling Strategy & Update `initializeDatabase` (✅ Completed):**
+            *   Action: Decide on dropping/migrating old tables (`sentiment_data`, `complex_filter_sentiment_data`). Modify `initializeDatabase` to *not* create these old tables.
+            *   Test: N/A (decision documentation), then verify `initializeDatabase` only creates new schema.
+
+    *   **G.2: Core Aggregation Refactor (`src/server/aggregation.ts`)**
+        *   **G.2.1: Refactor `aggregateAndStore` - Data Preparation (Per-Metric Averages) (✅ Completed):**
+            *   Action: Modify `aggregateAndStore` to iterate `currentIntervalScores`. For each language/signal_name, calculate average scores for *each individual metric* (emotions, post_count).
+            *   Test: Unit test this logic: given sample `currentIntervalScores`, verify correct derivation of per-metric average values.
+        *   **G.2.2: Refactor `aggregateAndStore` - MA Calculation & Row Assembly (Per-Metric MAs) (⚪ To Do):**
+            *   Action: For each derived average metric value, use the new `calculateNumericMA` and adapted `liveAvgMAState` to get short/long MAs. Assemble rows for `sentiment_metrics` (one row per timestamp/language/signal_name/metric_name).
+            *   Test: Unit test this logic: given per-metric averages and MA states, verify correct MAs and `sentiment_metrics` row structure.
+        *   **G.2.3: Refactor `aggregateAndStore` - Database Insertion into `sentiment_metrics` (✅ Completed for raw_value):**
+            *   Action: Implement `INSERT INTO sentiment_metrics ... ON CONFLICT DO UPDATE` for the assembled rows.
+            *   Test: Run backend with firehose/mock data. Verify `sentiment_metrics` table is populated correctly for various signals ('default', filters) and all metrics, including their raw and MA values.
+
+    *   **G.3: Filter Integration & Data Flow for Normalized Storage**
+        *   **G.3.1: Adapt Filter Definition & `signal_name` Usage (⚪ To Do):**
+            *   Action: Ensure `scripts/manage_filters.ts` creates filters with unique `signal_name`s. Ensure `firehoseHandler.ts` uses these `signal_name`s, passing them to aggregation logic for storage in `sentiment_metrics.signal_name`.
+            *   Test: Create filter via CLI. Send matching test posts. Verify data in `sentiment_metrics` uses the correct filter `signal_name`.
+        *   **G.3.2: Update Data Pruning Logic for `sentiment_metrics` (✅ Completed):**
+            *   Action: Modify pruning logic in `aggregateAndStore` to `DELETE FROM sentiment_metrics WHERE timestamp < $1`.
+            *   Test: Verify old data is removed from `sentiment_metrics` after pruning runs.
+
+    *   **G.4: Backend Cleanup & API Strategy for Grafana Variables**
+        *   **G.4.1: Remove Obsolete Backend Logic & Types (⚪ To Do):**
+            *   Action: Remove functions for old JSONB data fetching/formatting (e.g., `getAggregatedData`), unused MA state loading, and old types from `src/types.ts`.
+            *   Test: Backend builds and runs without errors; core functionality remains.
+        *   **G.4.2: Confirm API Strategy (✅ Completed):**
+            *   Action: Remove `/api/metrics` GET endpoint from `httpServer.ts`. Review necessity of `POST /api/filters` if filter creation is solely via CLI. Assume Grafana variables will use direct DB queries.
+            *   Test: Removed API endpoints are inaccessible. Kept API endpoints function as intended (if any).
+
+    *   **G.5: Grafana Setup & Dashboarding (External Configuration)**
+        *   **G.5.1: Install & Configure Grafana + PostgreSQL Data Source (✅ Completed):**
+            *   Action: Set up Grafana instance and connect to PostgreSQL. (External step)
+            *   Test: Grafana successfully connects to the database.
+        *   **G.5.2: Implement Grafana Dashboard Variables (✅ Completed):**
+            *   Action: In Grafana, create `Language`, `SignalName`, `MetricName`, `MA_Type` variables using SQL queries against `lexicon_languages`, `lexicon_emotions` (for metric names), and distinct values from `sentiment_metrics` (`signal_name`, `language`).
+            *   Test: Grafana variables populate correctly with expected options.
+        *   **G.5.3: Develop Grafana Panel Queries for `sentiment_metrics` (✅ Completed):**
+            *   Action: Write and refine SQL queries for Grafana panels that use the dashboard variables to select and display data from `sentiment_metrics` (raw_value, short_ma_value, long_ma_value).
+            *   Test: Queries run successfully in Grafana's query editor and fetch expected data subsets based on variable selections.
+        *   **G.5.4: Build Sentiment & Volume Dashboards in Grafana (✅ Completed):**
+            *   Action: Construct Time Series panels for metrics and Post Volume (where `metric_name='post_count'`), configure legends, axes, and styles. (External step)
+            *   Test: Dashboards display data correctly, update with variable changes, and are visually coherent.
+
+    *   **G.6: Final Project Cleanup & Documentation Update**
+        *   **G.6.1: Perform Manual Deletion of Old Frontend Assets (⚪ To Do):**
+            *   Action: Manually delete `public/`, `dist/`, `screenshot.png`, `NRC Emotion Lexicon.zip` (as per previous cleanup phase if not already done).
+            *   Test: Project directory reflects a backend-only application for data processing.
+        *   **G.6.2: Update Project `README.md` and other documentation (⚪ To Do):**
+            *   Action: Document the new backend architecture, reliance on Grafana for visualization, how to manage filters via CLI, and how to set up the Grafana dashboards (including example queries for variables/panels).
+            *   Test: Documentation is accurate, comprehensive, and guides a new user/developer.
